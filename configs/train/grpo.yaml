@@ -1,0 +1,40 @@
+# train/grpo/runner.py::GrpoTrainingConfig — B5 GRPO on veRL.
+#
+# base_model_name_or_path: PLAN.md "基座 Qwen3.5-9B（80GB下可行）；
+# 求快可先用同族 2B/4B 验证流水线" — this config is the real 9B target;
+# a same-family smaller model swaps only this one field for a fast
+# pipeline-validation pass, no other config changes needed.
+# lora_target_modules: same full-32-layer coverage list every other
+# round's LoRA config reuses (train/gdn_lora_coverage.py's requirement
+# is architecture-wide, not round-specific).
+# rollout_k: GRPO's group size — PLAN.md doesn't pin a literal number
+# for B5 the way it does k=4 for B4's DPO sampling; 8 is a common GRPO
+# group-size choice in published recipes, not tuned by this project.
+# rollout_max_concurrency/rollout_timeout_s: passed straight through to
+# sqlexec.pool.execute_many (A2) — same defaults A4's eval configs use.
+# harness_error_abort_threshold: reuses eval/metrics.py's
+# HARNESS_ERROR_FLOOD_THRESHOLD (0.01) value directly rather than
+# picking a second number — kept in sync deliberately, see
+# docs/design-decisions.md.
+# lr/batch_size/seed/max_hours are explicit per CLAUDE.md §4.
+
+base_model_name_or_path: "Qwen/Qwen3.5-9B"
+lora_target_modules:
+  - gate_proj
+  - up_proj
+  - down_proj
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - in_proj_qkvz
+  - in_proj_ba
+  - out_proj
+  - conv1d
+rollout_k: 8
+rollout_max_concurrency: 8
+rollout_timeout_s: 30.0
+harness_error_abort_threshold: 0.01
+seed: 42
+max_hours: 8.0
+output_dir: "artifacts/train/grpo-qwen3.5-9b"

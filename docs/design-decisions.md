@@ -1081,3 +1081,36 @@
   同时 `pair_count=60`（20 题里每题 3 个 tier1 候选 × 1 个 tier2
   候选 = 3 对/题）——证明这条观察的计算路径本身是通的，不代表 B1
   真实 SFT 模型的准确率会落在这个区间。
+
+---
+
+## DD-0036 · GRPO 奖励也 mask UNDECIDABLE，不只 mask PLAN.md 点名的
+  系统错和截断
+
+- 日期：2026-08-24 · Run: 无（无 GPU，本轮不产生真实 GRPO rollout/
+  reward 数字）
+- 决策：`train/grpo/reward.py::compute_reward` 除了 PLAN.md ★ 明确点名
+  要 mask 的系统错（HARNESS_DB_UNAVAILABLE/HARNESS_INTERNAL）和输出
+  截断（OUTPUT_TRUNCATED），额外把 `ComparisonResult.UNDECIDABLE`
+  （gold SQL 自己执行失败，A1 已知约 4.5% 的 BIRD-train gold 会
+  这样）也纳入 mask 范围（`reward=None`），而不是按 PLAN.md 字面
+  「语法合法但结果错 0.0」的三档描述把它算作 0.0。
+- 考虑过：严格按 PLAN.md 原文的三档 + 两类 mask 实现，不额外扩展
+  mask 范围，UNDECIDABLE 走"结果错→0.0"这一档。
+- 为什么不这么做：如果 gold SQL 本身跑不出结果，就没有一个真实的
+  "正确答案"可以拿来判断模型的 SQL 到底对不对——这种情况下给模型打
+  0 分，惩罚的不是模型的错误，而是数据集本身的缺陷，和 PLAN.md ★ 第
+  1 条"把系统错当模型错是全项目最容易犯、最难发现、后果最严重的
+  bug"是同一类问题，只是触发源不是沙箱/进程故障而是金标准数据缺陷。
+  B4 `dpo.py` 的偏好对构造已经把 UNDECIDABLE 列为丢弃项（不进任何
+  偏好对），B5 的奖励函数如果对同一类样本给出不同处理（一个丢弃、
+  一个打 0 分），会是两轮训练流程之间一个说不出道理的不一致。
+- 什么情况会失效：如果未来 A1 的 gold SQL 执行验证流程消灭了这
+  ~4.5% 的失败率（比如切换到一个更干净的过滤子集），这条 mask 分支
+  在实践中会越来越少触发，但作为一条防御性规则不需要因此移除——
+  只要 gold 执行失败这个可能性存在，这条 mask 就该在。
+- 实测数字：`tests/unit/b5/test_reward.py::TestComputeReward::
+  test_undecidable_is_masked_not_zero` 和
+  `tests/meta/b5/test_reward_masking_can_fail.py`（参数化覆盖全部
+  四种 mask 场景，包括 UNDECIDABLE）验证 `reward is None` 而不是
+  `== 0.0`，可重复运行确认。

@@ -1412,3 +1412,119 @@ DD-0035 里的 `exec_ok_correct_share=75.0%`/`pair_count=60` 来自本轮
     真机训练+效果验证才能确认，本轮只保证"不同级不配对"这条硬约束
     被遵守。
 ```
+
+```
+B5（同一 session）—— B-track 训练线收尾，PLAN.md v2 微调版
+做了什么：
+  - train/grpo/ 新包（PLAN.md 明确要求目录形态"src/modelhub/train/
+    grpo/"，不是单文件）：
+    - `reward.py` —— 本轮真正的难点（PLAN.md 原话"本轮真正的难点，
+      也是最好的面试素材"）：`compute_reward` 白名单式穷举分类，
+      mask（`reward=None`，永远不是 0.0）覆盖 PLAN.md ★ 点名的
+      HARNESS_DB_UNAVAILABLE/HARNESS_INTERNAL/OUTPUT_TRUNCATED，
+      外加本轮自己判断该同样 mask 的 UNDECIDABLE（DD-0036，与 B4
+      `dpo.py` 对同一类样本的处理保持一致）；`RolloutReward` 用
+      `__post_init__`强制"MASKED 必须 reward=None+有 mask_reason，
+      非 MASKED 必须有真实 reward+无 mask_reason"这条互斥约束，不是
+      靠调用方自觉维护。
+    - `group_diagnostics.py` —— PLAN.md ★"reward 全0或组内全相同→
+      告警"：`diagnose_group`判定"全相同"覆盖全 0/全 1/任意其他
+      单一值（不是只判 0 这个特殊情况），外加"全部被 mask、组内没有
+      任何可比较的 reward"这个 PLAN.md 没直接点名但同样致命的退化
+      场景（advantage 同样算不出来）。
+    - `step_diagnostics.py` —— PLAN.md ★ 项3-4"每步记录系统错/超时/
+      截断占比+reward直方图"+"系统错占比>阈值→中断训练并告警"：
+      中止阈值直接复用 `eval/metrics.py::HARNESS_ERROR_FLOOD_
+      THRESHOLD`（1%，CLAUDE.md §2.2 原文"占比>1%→中止"），不是给
+      GRPO 单独发明第二个数字。
+    - `rollout_timing.py` —— PLAN.md 项6"★ 测 rollout 时间里有多少
+      花在等 SQL 上"：并发+超时机制直接复用 A2 `sqlexec/pool.py::
+      execute_many`（不重新实现），这个模块只加了真实 wall-clock
+      计时包装，让"等 SQL 占比"是真实测量值不是估算。
+    - `kernel_guard.py` —— PLAN.md ★ 项9"rollout 侧 vLLM 同样要验证
+      GDN kernel 状态"：直接复用 B1/A5 `serve/kernel_status.py::
+      detect_gdn_kernel_status`，没有为 rollout 侧重新写一遍检测
+      逻辑。
+    - `smoke_test.py` —— PLAN.md ★"先跑10步烟测确认显存与流水线"：
+      显存检查复用 B1 `train/smoke_test.py::check_peak_memory`原样，
+      流水线完成度是 GRPO 自己的新标准（目标步数 vs 实际完成步数 +
+      是否被系统错占比中止）。
+    - `runner.py` —— `GrpoTrainingConfig`、`check_verl_available`
+      （guarded，本沙箱未装 verl）、`run_grpo_preflight`（目前只接
+      rollout 侧 kernel 检查，GPU 显存/LoRA 覆盖率检查留给真机入口
+      复用 B1 现成检查，不在这里重复）、`run_grpo_training`——veRL
+      真实调用形态是 Hydra/YAML 驱动的 CLI（`python -m verl.trainer.
+      main_ppo ...`），不是一个能在 Python 里直接构造调用的训练器
+      类，本项目没有足够把握确认具体调用方式，显式
+      `NotImplementedError`（同 B2 FSDP、B4 DPOTrainer 的处理方式）。
+  - configs/train/grpo.yaml —— 验证过能被 `load_yaml_config` 正确
+    加载；`lora_target_modules`沿用 B1/B2/B3/B4 同一份全32层覆盖
+    列表；`harness_error_abort_threshold`直接写 0.01 并在注释里说明
+    与 `HARNESS_ERROR_FLOOD_THRESHOLD` 保持同步，不是巧合。
+  - pyproject.toml —— `train` extra 新增 `verl>=0.2`，mypy overrides
+    新增 `verl.*`。
+  - 单元测试 48 条（tests/unit/b5/：`compute_reward`对每个真实
+    exec_code/comparison_result 组合穷举测过，`RolloutReward`/
+    `RolloutGroup`两个构造函数级互斥约束单独测；`rollout_timing.py`
+    用真实 SQLite db + 真实 `execute_many`测并发执行）、元测试 9 条
+    （tests/meta/b5/：参数化覆盖全部四种 mask 场景真实产出 None 而非
+    0.0；退化组检测在全同值/全 mask 两种场景真实触发，健康方差场景
+    真实不触发；系统错占比超阈值真实中止训练，健康占比真实不中止）、
+    烟测 1 条（tests/smoke/b5/：3题×k=4，全程走真实 sqlexec 并发
+    执行+真实 A3 比对+真实 reward+真实组/步诊断，没有一处手写
+    exec_code/comparison_result——和单测"构造 PredictionRecord 直接
+    测单个函数"的风格刻意区分开）。`make verify-b5`（走泛用
+    `verify-%`模式规则）三段全绿；mypy --strict 对 125 个源文件
+    干净；全项目 926 个测试全绿，无跨轮 regressions；
+    `check_no_cheating src`/`check_placeholders docs src` 均干净。
+
+遇到什么问题：
+  1. 写 `reward.py` 时对照 B4 `dpo.py` 的三档分类，发现 PLAN.md B5
+    的奖励三档描述（结果匹配1.0/语法合法但结果错0.0/语法错0.0）和
+    mask 清单（系统错+截断）都没提 UNDECIDABLE 该怎么处理——如果照
+    字面意思归进"结果错→0.0"，等于对一个金标准数据本身就有缺陷的
+    样本打了模型的 0 分，是 PLAN.md ★ 第1条点名的那类 bug 的又一个
+    变种。选择显式 mask（DD-0036），和 B4 对同一情况的处理保持一致，
+    而不是让两轮训练流程对"gold 执行失败"给出不同答案。
+  2. `group_diagnostics.py`的退化判定最初写成"reward == 0.0 的
+    数量占比"，意识到 PLAN.md 原文"组内全相同"这个更本质的表述——
+    全 1.0 的组和全 0.0 的组在 GRPO advantage 计算里是同样白跑的
+    （组内归一化，全同值 → 方差为0 → advantage 恒为0），改成
+    `len(set(scored)) <= 1`的通用判定，测试里专门加了
+    `test_all_one_is_also_degenerate`防止这个判断退化回"只看是否
+    全 0"的特殊情况。
+  3. veRL 真实的 Python 调用入口本项目查证后没有足够把握——它更像
+    Hydra config-driven 的 CLI 工具而不是一个可以直接 import 构造的
+    训练器类（这一点和 TRL 的 `DPOTrainer`、LLaMA-Factory 的
+    `llamafactory-cli`都不一样，后两者至少有一种确定的接线方式）。
+    没有编一个可能是错的 `import verl; verl.Trainer(...)`式调用，
+    `run_grpo_training`对已安装 verl 的分支显式 `NotImplementedError`，
+    真实调用形态留给真机验证。
+
+怎么解决的：见上。
+
+测出什么数字：无（无 GPU，本轮不产生任何真实 GRPO rollout/reward/
+训练曲线数字）。tests/smoke/b5/ 里 3 题×k=4 的真实 sqlexec 执行+比对
+只用来验证 reward→group诊断→step诊断这条链路本身接得通，不是任何
+真实模型的 rollout 结果。
+
+诚实清单：
+  - 没做：任何真实的 veRL rollout/训练（本沙箱没有 verl、没有 vLLM、
+    没有 GPU；`run_grpo_training`对已装 verl 的分支是
+    `NotImplementedError`，真实调用形态未接线）；rollout 侧 vLLM 的
+    GDN kernel 检测从未在真实 vLLM 实例上跑过（`guard_rollout_
+    kernel_status`复用的 `detect_gdn_kernel_status`本身在本沙箱里
+    唯一走到的分支是"无 CUDA 设备→degraded"，见 `tests/unit/b5/
+    test_kernel_guard.py`的说明）；10 步烟测从未针对真实显存/真实
+    流水线跑过——`GrpoSmokeCriteria`只验证过判定逻辑本身的正确性。
+  - 假设了什么：`rollout_k=8`（配置文件里的示例值，PLAN.md 没有像
+    B4 的 k=4 那样给 B5 一个字面数字，8 是发表过的 GRPO 方案里常见
+    的组大小选择，未经本项目调参）；veRL 真实调用形态是 Hydra/YAML
+    驱动的 CLI（本项目查证后的最佳理解，未在真实安装上验证）。
+  - 已知局限：`compute_reward`把 UNSAFE_STATEMENT 归进"模型自己的
+    错，reward=0.0"而不是单独 mask 或单独扣分——这是本轮基于"和 B4
+    `dpo.py`处理同一 gap 的方式保持一致"这个理由做的选择，PLAN.md
+    原文完全没提到这种候选，真机第一批真实 rollout 出现大量
+    UNSAFE_STATEMENT 时（比如模型学坏了开始批量生成危险语句），
+    reward 曲线会不会因此产生某种需要额外分析的模式，本轮无法验证。
+```
