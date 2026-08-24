@@ -1,0 +1,22 @@
+# Arctic-Text2SQL-R1-7B serving profile.
+#
+# Source: FACTS.md §二 "三模型 KV 经济学" table.
+# layer/kv_head/head_dim (28 / 4 / 128) and the KV/token formula are
+# architecture facts, exactly reproducible: 2*28*4*128*2 = 57344 bytes
+# = 56 KiB/token, matching FACTS.md's documented value exactly
+# (tests/unit/a5/test_model_profile.py asserts this).
+#
+# weight_bytes is an estimate (15.2 "GB" in FACTS.md, read here as GiB) —
+# confirm against the real on-disk weight size / vLLM's reported
+# "Loading model weights took N GB" log line once this model is actually
+# downloaded and served (see serve/vllm_log_parser.py).
+
+model_id: "arctic-text2sql-r1-7b"
+total_layers: 28
+full_attention_layers: 28   # dense attention throughout — not a GDN hybrid
+gdn_layers: 0
+kv_heads: 4
+head_dim: 128
+kv_dtype_bytes: 2            # bf16/fp16 KV cache
+gdn_fixed_state_bytes: 0     # no GDN layers on this model
+weight_bytes: 16320875725    # 15.2 GiB, estimate — see comment above

@@ -263,3 +263,75 @@ serve/ 真实起服务之后的事）；本轮所有"数字"都是测试断言�
 构造值（4 样本/100 样本这类烟测/元测试规模),不满足 manifest 三个
 清洁位、不构成可对外引用的数字。
 ```
+
+```
+A5（同一 session）
+做了什么：
+  - serve/schema_format.py —— 真实 `sqlite3` PRAGMA 反射（`PRAGMA
+    table_info`/`PRAGMA foreign_key_list`），不是从 BIRD/Spider 的
+    `tables.json` 元数据抄一份 schema——后者可能跟真实 db 文件本身对不上。
+    两种渲染风格：`ddl`（CREATE TABLE 块，信息密度最高）、`compact`
+    （`table(col1,col2)` 单行，给 A8 的 prompt 长度扫描用）。
+  - serve/prompt.py —— `build_prompt`/`make_prompt_builder`，直接补上
+    A4/DD-0012 里刻意留空的 `run_eval(prompt_builder=...)` 插槽；
+    `SchemaCache` 按 db_id 缓存渲染结果，避免同一个 db 被评估的每条样本
+    都重新反射一次 schema。
+  - serve/kernel_status.py —— 把仓库里已经写好的 `preflight.py` G1/G2
+    （causal_conv1d/fla 的真实 CUDA kernel 调用，不是只 import）重构成
+    `serve/` 和未来 A9 门禁都能复用的函数，共享同一份检测逻辑而不是
+    各写一遍。SKIP（未装/无 CUDA）和 FAIL（装了但跑不通/产出非法值）都
+    折进 `degraded=True`，只有真正跑通的 PASS 才算数（CLAUDE.md §1.3
+    白名单原则）。
+  - serve/model_profile.py + configs/serve/model_profiles/{arctic_7b,
+    qwen3_5_9b}.yaml —— KV/token 公式代码化，两份 YAML 配置的层数/KV头/
+    head_dim 精确复现 FACTS.md §二表格，公式算出来的 56 KiB / 32 KiB
+    跟文档值逐位对上（测试里独立算一遍，不是照抄实现）。weight_bytes
+    和 Qwen3.5 的 gdn_fixed_state_bytes 在 YAML 注释里明确标成估算值，
+    等真实下载/服务后用 vllm_log_parser.py 解析出的真实数字替换。
+  - serve/vllm_log_parser.py —— 解析 vLLM 启动日志文本抽取 `# GPU
+    blocks`/`Maximum concurrency`/`Loading model weights took` 三类
+    确信度较高的已知稳定日志行；GDN 状态占用那一行的格式明确标成
+    "未经真实日志核实的最佳猜测"，不是包装成看起来一样可信的数字
+    （CLAUDE.md §12）。
+  - `pyproject.toml` 给 `torch`/`transformers`/`peft`/`accelerate`/
+    `datasets`/`vllm`/`causal_conv1d`/`fla` 加了 mypy
+    `ignore_missing_imports` override——这些是 `train` extra 的重型可选
+    依赖，本沙箱没装（无 GPU），运行时早已有真实 `try/except ImportError`
+    兜底，这条 override 只是让类型检查器别为"没装的包没 stub"这件事
+    报错，不改变真实机器上（这些包确实装了）的行为。
+  - 单元测试 33 条（tests/unit/a5/）、元测试 2 条（tests/meta/a5/，
+    证明"未验证的 GDN kernel 状态必须污染 manifest"这条链路真的能红——
+    而且本沙箱确实没装 causal_conv1d/fla/torch，走的是真实的负向路径，
+    不是构造出来的假失败）、烟测 1 条。`make verify-a5` 36 个用例全绿。
+
+遇到什么问题：
+  1. A5 没有在 CLAUDECODEPROMPTS.md 原文可查（那份文件是本 session
+     一开始的上传附件，不在仓库里，context 压缩后原文不可再取）——
+     本轮范围是从仓库里现有的三份文件（FACTS.md 的 KV 经济学表格、
+     MODEL-SELECTION-FINAL.md §五"CLAUDE-CODE-PROMPTS.md 的改动"表格
+     对 A5 的具体修订、preflight.py 已经写好的 G1-G5）交叉确定的，
+     不是凭空猜的（DD-0014 里写了完整推理链）。
+  2. 一开始把"KV 预算 → 最大并发数"的完整容量规划公式也想放进
+     `model_profile.py`——写到一半意识到 MODEL-SELECTION-FINAL.md
+     明确把"压测扫描...产出交叉曲线"划给了 A8，A5 的修订条目只提到
+     "解析 KV block 数"，没提并发估算。把范围收窄成
+     `kv_bytes_per_token` + `gpu_blocks_to_cacheable_tokens`
+     两个直接服务于"log 解析出的数字该怎么解读"的函数，完整的容量
+     规划公式留给 A8，没有在这一轮抢先做一半、留一半给 A8 时又要
+     重新决定"这部分到底算谁的"。
+  3. mypy 在激活 sqlexec 相关 extras 装了 duckdb/psycopg 的 venv 下
+     对 `import torch` 报 import-not-found——这是本项目第一次在 src/
+     里出现"根本没装、且连一次都没装过"的可选依赖（duckdb/psycopg
+     从 A2 起就已经通过 sqlexec extra 装好了，torch 从来没装，因为
+     `make install` 装的 extras 列表里没有 `train`）。没有给每处
+     `import torch` 单独加 `# type: ignore`，而是在 `pyproject.toml`
+     加了一条按模块名生效的 mypy override，B1/B2/B4/B5 训练那几轮会
+     大量 `import torch`，一次性在配置层解决比每处散落注释更不容易漏。
+
+怎么解决的：见上。
+
+测出什么数字：无。`kv_bytes_per_token` 的 56 KiB/32 KiB 是从 YAML
+里写死的架构事实（层数/KV头/head_dim，来自 FACTS.md 的已推算表格）
+算出来的，不是实测；`weight_bytes`/`gdn_fixed_state_bytes` 在 YAML
+注释里明确标了"估算，等真实运行替换"。
+```

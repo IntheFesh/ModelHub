@@ -83,6 +83,27 @@ strict = true
 warn_unused_configs = true
 exclude = ["^scripts/night_queue_fixtures/"]
 
+# GPU-only optional deps (the `train` extra) are never installed in this
+# sandbox (no GPU, per CLAUDE.md — see docs/design-decisions.md) and ship
+# no inline type stubs either way. Every import of these is already
+# guarded at runtime by a real try/except ImportError (CLAUDE.md §1.3:
+# "not installed" must be a real, observed SKIP, never assumed) — this
+# override only silences the *type-checker's* missing-stub complaint, it
+# does not change runtime behavior on a real GPU machine where these
+# packages genuinely are installed.
+[[tool.mypy.overrides]]
+module = [
+    "torch.*",
+    "transformers.*",
+    "peft.*",
+    "accelerate.*",
+    "datasets.*",
+    "vllm.*",
+    "causal_conv1d.*",
+    "fla.*",
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

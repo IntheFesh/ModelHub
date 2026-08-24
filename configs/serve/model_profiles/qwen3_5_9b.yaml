@@ -1,0 +1,29 @@
+# Qwen3.5-9B serving profile (GDN hybrid architecture).
+#
+# Source: FACTS.md §二 "三模型 KV 经济学" table + MODEL-SELECTION-FINAL.md.
+# 32 total layers = 24 GDN (linear attention, O(1) recurrent state) + 8
+# full attention. Only the 8 full-attention layers contribute to
+# kv_bytes_per_token: 2*8*4*256*2 = 32768 bytes = 32 KiB/token, matching
+# FACTS.md's documented value exactly
+# (tests/unit/a5/test_model_profile.py asserts this).
+#
+# gdn_fixed_state_bytes is explicitly flagged uncertain by
+# MODEL-SELECTION-FINAL.md §六 ("GDN 固定态的 12–24 MB 是估算，不同资料
+#给的算法不一致") — 18 MiB used here as FACTS.md's point estimate inside
+# that acknowledged range, NOT a measured value. preflight.py G4 and
+# serve/vllm_log_parser.py exist specifically to replace this with a real
+# number once the model is actually loaded.
+#
+# weight_bytes is likewise an estimate (18.0 "GB" in FACTS.md, read here
+# as GiB) pending confirmation against the real download / vLLM's
+# "Loading model weights took N GB" log line.
+
+model_id: "qwen3.5-9b"
+total_layers: 32
+full_attention_layers: 8
+gdn_layers: 24
+kv_heads: 4
+head_dim: 256
+kv_dtype_bytes: 2             # bf16/fp16 KV cache
+gdn_fixed_state_bytes: 18874368  # ~18 MiB, ESTIMATE — see comment above
+weight_bytes: 19327352832     # 18.0 GiB, estimate — see comment above

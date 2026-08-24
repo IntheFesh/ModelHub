@@ -367,3 +367,45 @@
 - 实测数字：无。测试本身就是证据：
   `tests/unit/a4/test_model_client.py::test_generation_result_forbids_unknown_field`
   修复前失败（`DID NOT RAISE ValueError`），修复后通过。
+
+---
+
+## DD-0014 · A5 的范围划定：只做"服务层需要知道的静态事实"，不启动真实 vLLM
+
+- 日期：2026-08-24 · Run: 无（A5 不产生性能数字，见下方"实测数字"）
+- 决策：`serve/` 本轮只做四件事——(1) 从真实 SQLite 文件反射出 schema 并
+  渲染成 prompt 文本（`schema_format.py`/`prompt.py`，直接补上 A4/DD-0012
+  留空的 `prompt_builder` 插槽）；(2) GDN 快 kernel 生效检测
+  （`kernel_status.py`，把 `preflight.py` 里人工写好的 G1/G2 真实 CUDA
+  kernel 调用逻辑重构成可被 serve 时/A9 门禁复用的函数，不是重新发明一遍）；
+  (3) 双模型的 KV 经济学（`model_profile.py` + `configs/serve/model_profiles/
+  *.yaml`，公式可独立复现 FACTS.md 表里的 56 KiB/32 KiB）；(4) vLLM 启动
+  日志解析（`vllm_log_parser.py`）。**没有**实现"真的启动一个 vLLM 进程
+  并服务请求"——那需要真实 GPU + 下载两个模型权重，本沙箱都没有。
+- 考虑过：(a) 把"启动 vLLM 子进程、暴露 HTTP 接口"也一起写掉，用
+  `subprocess.Popen(["vllm", "serve", ...])` 拼出完整命令，反正沙箱里
+  跑不通就标 `requires_gpu` 跳过——这正是 A4 处理 `HttpModelClient` 时
+  用过的模式（DD-0003）。
+- 为什么不跟着 (a) 做：`HttpModelClient` 那次能这么做，是因为"发一个
+  HTTP 请求、解析 JSON 响应"这段逻辑本身在没有服务端时也是可读、可 review
+  的完整代码，唯一缺的是运行时对端。而"拼出 `vllm serve` 的启动命令行"
+  这件事的正确性高度依赖 vLLM 当前版本的真实 CLI 参数名
+  （FACTS.md 自己都点名"vLLM 当前版本的 MTP/推测解码参数名"是需要
+  `vllm serve --help` 核对的未知项，见 FACTS.md 表格第 6 行）——在没有
+  网络装 vLLM、没有 GPU 验证任何一个参数名的情况下写这段代码，
+  不是"写了但未验证的真实代码"，而是更接近凭印象编一个"像是"正确的
+  命令行，这正是 CLAUDE.md §12"不确定就说不确定"要挡的那类东西。
+  schema/prompt/kernel-detection/log-parser 这四块则不同：
+  schema 反射和渲染是纯逻辑，在真实 SQLite 文件上完整可测；kernel
+  detection 是把已经存在于仓库里、人工写好并且格式明确的 `preflight.py`
+  G1/G2 原样复用；KV 公式是从 FACTS.md 已经写死的架构事实（层数/KV头/
+  head_dim）反推，可独立核对；日志解析器则明确把"确信的 pattern"
+  （`# GPU blocks:`、`Maximum concurrency for`、`Loading model weights
+  took`）和"不确信的 pattern"（GDN 状态占用那一行的具体格式）分开标注，
+  没有把两者混为一谈。
+- 什么情况会失效：一旦用户在真实 GPU 机器上跑通了 `vllm serve` 并把
+  真实启动命令/参数回传，"拼命令行启动 vLLM"这部分工作应该补上——
+  到那时候有真实命令行可以核对，不再是凭印象编。
+- 实测数字：无。`tests/unit/a5/test_vllm_log_parser.py` 里的日志片段是
+  手写的、按已知 vLLM 日志格式构造的，不是真实 run 的产物，
+  docstring 里写明了这一点。
