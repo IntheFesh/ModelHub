@@ -1,0 +1,19 @@
+# bench/experiments/speculative_decoding.py::SpeculativeDecodingExperimentConfig
+#
+# accepted_tokens_metric_name/draft_tokens_metric_name name vLLM's own
+# speculative-decode Prometheus counters as of this project's pinned
+# vLLM version — re-verify against the real /metrics output on first
+# real GPU run (see vllm_metrics.py's module docstring on metric-name
+# drift). concurrency_levels is the sweep grid the decay curve is
+# measured over — PLAN.md wants the point where speedup collapses to
+# be inside this range, not just the low-concurrency happy case.
+
+metrics_url: "http://localhost:8000/metrics"
+accepted_tokens_metric_name: "vllm:spec_decode_num_accepted_tokens_total"
+draft_tokens_metric_name: "vllm:spec_decode_num_draft_tokens_total"
+concurrency_levels: [1, 4, 16, 64]
+num_requests_per_level: 30
+max_tokens: 256
+temperature: 0.0
+generate_timeout_s: 60.0
+prompt_length_label: "1k"

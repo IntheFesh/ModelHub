@@ -1,4 +1,4 @@
-.PHONY: help venv install lint typecheck test verify-% smoke bench \
+.PHONY: help venv install lint typecheck test verify-% verify-a11-% smoke bench \
         check-cheating check-placeholders night-queue clean
 
 PYTHON ?= python3
@@ -71,6 +71,26 @@ verify-%:
 	@if [ -d tests/smoke/$* ]; then \
 		echo "-- smoke --"; $(PYTEST) tests/smoke/$* -v -m "$(VERIFY_MARKEXPR)"; \
 	else echo "-- smoke: 无 tests/smoke/$* --"; fi
+
+# A11 has six independent experiment groups (bench/experiments/) — PLAN.md's
+# "五组实验...每组独立" plus a v2-added sixth (MFU/MBU) — each verifiable on
+# its own via make verify-a11-<n>. These are explicit targets so they take
+# precedence over the verify-% pattern above; verify-a11 (via that pattern)
+# still runs the whole tests/{unit,meta,smoke}/a11/ suite together.
+A11_GROUP_1 := quantization
+A11_GROUP_2 := prefix_cache
+A11_GROUP_3 := speculative_decoding
+A11_GROUP_4 := constrained_decoding
+A11_GROUP_5 := engine_comparison
+A11_GROUP_6 := mfu_mbu_comparison
+
+verify-a11-%:
+	@echo "════════════════════════════════════════════════════════════"
+	@echo " make verify-a11-$* ($(A11_GROUP_$*))"
+	@echo "════════════════════════════════════════════════════════════"
+	@$(RUFF) check src/modelhub/bench/experiments/$(A11_GROUP_$*).py tests/unit/a11/test_$(A11_GROUP_$*).py
+	@echo "-- unit --"
+	@$(PYTEST) tests/unit/a11/test_$(A11_GROUP_$*).py -v -m "$(VERIFY_MARKEXPR)"
 
 smoke:
 	$(PYTEST) tests/smoke/$(PROFILE) -v -m "not requires_gpu and not requires_network"

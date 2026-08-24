@@ -1,0 +1,9 @@
+# bench/experiments/constrained_decoding.py::ConstrainedDecodingExperimentConfig
+#
+# Operational defaults, not measured values — this experiment's own
+# numbers (syntax-legality improvement, EX change, throughput cost) are
+# what gets measured, not these serving parameters.
+
+max_tokens: 256
+temperature: 0.0
+generate_timeout_s: 60.0

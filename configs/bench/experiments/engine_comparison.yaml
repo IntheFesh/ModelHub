@@ -1,0 +1,17 @@
+# bench/experiments/engine_comparison.py::EngineComparisonExperimentConfig
+#
+# TensorRT-LLM is not a third arm here — see engine_comparison.py's
+# module docstring and DD-0025: SM120/121's trtllm-gen FMHA cubin is
+# missing (falls back to unfused MHA) and installation only works via an
+# NGC container, so it is excluded rather than measured under a
+# misleadingly-degraded configuration.
+# sla_latency_p99_s is a planning target (this project's stated Text2SQL
+# SLA), not a number derived from a real measurement.
+
+concurrency: 16
+num_requests: 100
+max_tokens: 256
+temperature: 0.0
+generate_timeout_s: 60.0
+prompt_length_label: "1k"
+sla_latency_p99_s: 5.0

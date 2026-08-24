@@ -1,0 +1,20 @@
+# bench/experiments/prefix_cache.py::PrefixCacheExperimentConfig
+#
+# hits_metric_name/queries_metric_name name vLLM's OWN Prometheus counter
+# names as of this project's pinned vLLM version — these have moved
+# across vLLM releases (see vllm_metrics.py's module docstring), so this
+# string pair is exactly what should be diffed/re-verified on a vLLM
+# version bump, not hardcoded inside the scraper.
+# num_distinct_dbs/requests_per_db/interleaving_degrees are the traffic
+# shape for the "request-interleaving degree" experiment (PLAN.md: don't
+# hammer one db to fake a 99% hit rate) — illustrative, not measured.
+
+metrics_url: "http://localhost:8000/metrics"
+hits_metric_name: "vllm:gpu_prefix_cache_hits_total"
+queries_metric_name: "vllm:gpu_prefix_cache_queries_total"
+num_distinct_dbs: 8
+requests_per_db: 20
+interleaving_degrees: [1, 4, 20]   # 20 == "同一个db连发20次" the easy case
+max_tokens: 256
+temperature: 0.0
+generate_timeout_s: 60.0

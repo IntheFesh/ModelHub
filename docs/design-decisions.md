@@ -671,3 +671,77 @@
   和同文件里 harness-error 的对照测试，一起验证了"模型错"和"系统错"
   在这个转换里被分别记到了 `succeeded` 和 `is_harness_error` 两个
   独立字段上，不会互相污染。
+
+---
+
+## DD-0023 · A11 前置门槛复用 `RunManifest.is_polluted`（严格超集），不只查两个具名 flag
+
+- 日期：2026-08-24 · Run: 无（A11 本轮不产生真实实验数字，本沙箱没有
+  真实 GPU/vLLM/SGLang 服务实例可测）
+- 决策：`bench/experiments/common.py::check_serving_precondition` 直接
+  调用 A0 的 `assert_not_polluted`，即 `degraded OR contaminated OR
+  git_dirty` 三者任一为 true 就拒绝执行——而不是只按 PLAN.md 原话字面
+  意思只查 `degraded`/`contaminated` 两个 flag。
+- 考虑过：新写一个只查两个具名 flag 的独立检查函数，更贴合 PLAN.md
+  原文的字面表述。
+- 为什么选：`is_polluted`是`git_dirty OR contaminated OR degraded`的
+  严格超集——PLAN.md没有、也不太可能真的想要"目标服务实例的 repo 是脏的
+  但因为 degraded/contaminated 都是 false 所以照样放行实验"这种场景；
+  6 组实验测的每一个数字（量化后的并发、命中率、加速比、MFU/MBU……）
+  都是"这次跑出来的数字能不能被引用"的问题，跟 A9 门禁复用同一个
+  `RunManifest.is_polluted` 是同一类判断，没有理由为 A11 单独破例
+  留一个更窄的口子。复用现成的、已经被 A0/A9/A10 三轮测试验证过的
+  函数，也避免了在第四个地方重新实现同一条"三个污染位任一为真就拒绝"
+  的逻辑、然后可能实现得不完全一致。
+- 什么情况会失效：如果未来出现"repo 脏但确定不影响本次实验数字"的
+  合法场景（比如实验代码本身在脏 repo 里跑，但要测的是纯硬件层的
+  MFU/MBU，跟 modelhub 自身代码版本无关)，需要重新评估要不要为 A11
+  单独放宽——但那应该是一次显式的、写清楚理由的例外，不是默认行为。
+- 实测数字：无。`tests/meta/a11/test_precondition_is_not_always_pass.py`
+  用三个独立注入（contaminated/degraded/git_dirty）分别证明前置门槛
+  会真的拒绝，并且编排器（`run_all_experiments`）在门槛不过时不会让
+  任何一组实验的回调函数被调用到。
+
+---
+
+## DD-0024 · 量化三方不含 NVFP4：SM120 上会回退 Marlin，标"NVFP4"是误导性标签
+
+- 日期：2026-08-24 · Run: 无
+- 决策：`bench/experiments/quantization.py::QuantizationMethod` 只有
+  AWQ / GPTQ / FP8 三个成员，NVFP4 不在其中。
+- 考虑过：把 NVFP4 作为第四种方法一起测，反正现在也跑不了真实
+  benchmark（本沙箱无 GPU），先把类型定义写全。
+- 为什么不这么做：这台项目目标硬件（RTX 5090, SM120）上，NVFP4 路径
+  在缺少原生 FP4 tensor core kernel 支持的情况下会静默回退到 Marlin
+  （INT4）kernel——如果这时候还把结果标成"NVFP4"，报告里会出现一个
+  实际测的是 INT4/Marlin 性能、却贴着 FP4 标签的数字，这正是
+  CLAUDE.md 反作弊条款要防的那类"看起来是新东西、其实是旧东西"的
+  失真。与其在代码里留一个永远会静默降级的枚举成员，不如现在就不
+  把它算作三方之一——等 SM120 真的有原生 FP4 kernel 支持时再加回来。
+- 什么情况会失效：SM120（或后续硬件）上出现真正的原生 FP4 执行路径
+  （不经过 Marlin 回退）时，NVFP4 才应该被加回 `QuantizationMethod`。
+- 实测数字：无（本沙箱无 GPU，此决策基于硬件能力的已核实事实，不是
+  一次可复现的 benchmark run）。
+
+---
+
+## DD-0025 · 引擎对比不含 TensorRT-LLM：SM120/121 上 FMHA cubin 缺失且只能走 NGC 容器安装
+
+- 日期：2026-08-24 · Run: 无
+- 决策：`bench/experiments/engine_comparison.py` 只对比 vLLM 与
+  SGLang 两个引擎，TensorRT-LLM 不是第三个对比对象。
+- 考虑过：三方对比（vLLM / SGLang / TensorRT-LLM），毕竟 TensorRT-LLM
+  在别的硬件上往往是吞吐最高的选项，缺席显得不完整。
+- 为什么不这么做：已核实 TensorRT-LLM 的 trtllm-gen 在 SM120/121 上
+  FMHA cubin 缺失，运行时会回退到 unfused MHA kernel——这条回退路径
+  本身就不是 TensorRT-LLM 真正想展示的性能形态，测出来的数字没有
+  代表性；而且它的安装路径只能走 NGC 容器，跟本项目其余组件统一走
+  `pyproject.toml` optional-dependencies + pip/uv 锁版本的依赖管理
+  方式不兼容，没法用同一套"关键库版本钉死并记进 manifest"的纪律去
+  管理它。两个理由任一单独存在都不足以排除它，合在一起（跑不出
+  代表性数字 + 装不进现有依赖管理体系）才是真正的原因。
+- 什么情况会失效：SM120/121 补上原生 FMHA cubin 支持、且出现非 NGC
+  容器的标准安装路径（比如官方发布 pip wheel）时，应该重新评估把
+  TensorRT-LLM 加回来。
+- 实测数字：无（本沙箱无 GPU；这条排除本身是基于已核实的硬件/发行
+  事实做出的范围决策，不是一次 benchmark 结果）。

@@ -46,6 +46,12 @@ train = [
     "accelerate>=0.33",
     "datasets>=2.20",
 ]
+experiments = [
+    "autoawq>=0.2",
+    "gptqmodel>=1.0",
+    "llmcompressor>=0.2",
+    "xgrammar>=0.1",
+]
 dev = [
     "ruff>=0.6",
     "mypy>=1.11",

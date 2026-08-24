@@ -1,0 +1,20 @@
+# bench/experiments/quantization.py::QuantizationExperimentConfig
+#
+# original_bits=16 (bf16, matching configs/serve/model_profiles/*.yaml's
+# weight_bytes, which are bf16-sized). gpu_memory_bytes/utilization/
+# runtime_overhead_bytes are the same real FACTS.md-documented RTX 5090
+# assumptions configs/bench/capacity_planning.yaml uses (32 GiB, 92%,
+# 2.5 GiB) — kept in sync deliberately, not re-derived.
+# prompt_tokens_for_capacity_estimate/max_new_tokens are planning
+# assumptions (typical BIRD/Spider SQL request/response length), not
+# measured values. generate_timeout_s is an operational default.
+
+methods: [AWQ, GPTQ, FP8]
+original_bits: 16
+gpu_memory_bytes: 34359738368     # 32 GiB
+gpu_memory_utilization: 0.92
+runtime_overhead_bytes: 2684354560  # 2.5 GiB
+prompt_tokens_for_capacity_estimate: 1024
+max_new_tokens: 256
+generate_timeout_s: 60.0
+thinking_modes: [false, true]

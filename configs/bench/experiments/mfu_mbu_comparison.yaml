@@ -1,0 +1,29 @@
+# bench/experiments/mfu_mbu_comparison.py::MfuMbuComparisonConfig
+#
+# ★ peak_bf16_flops/peak_bw_bytes_s below are FACTS.md's un-calibrated
+# RTX 5090 spec-sheet numbers (209 TFLOPS / 1792 GB/s) — NOT valid inputs
+# for a real run. compute_mfu/compute_mbu deliberately have no
+# spec-sheet fallback (monitor/mfu_mbu.py's module docstring); before a
+# real MFU/MBU run, these two fields MUST be replaced with
+# monitor/hardware_bench.py's `measure_bf16_tflops`/`measure_bw_gbs`
+# real measured output for the actual serving GPU, or the run must be
+# marked degraded in its manifest.
+#
+# thresholds mirror configs/monitor/bottleneck_thresholds.yaml's own
+# values (kept in sync deliberately, not re-derived) — that file's
+# comment already names A8/A11 as the real bench runs meant to calibrate
+# these once real prefill/decode measurements exist.
+#
+# arctic_model_params/qwen_model_params are ESTIMATES derived from
+# configs/serve/model_profiles/*.yaml's weight_bytes assuming bf16
+# storage (weight_bytes // 2): Arctic-7B -> ~8.16B, Qwen3.5-9B -> ~9.66B.
+# Pending the real param count from each model's config.json.
+
+peak_bf16_flops: 209000000000000.0   # 209 TFLOPS, spec-sheet, UNCALIBRATED
+peak_bw_bytes_s: 1792000000000.0     # 1792 GB/s, spec-sheet, UNCALIBRATED
+thresholds:
+  memory_bound_mbu_min: 0.5
+  memory_bound_mfu_max: 0.3
+  compute_bound_mfu_min: 0.5
+arctic_model_params: 8160437862
+qwen_model_params: 9663676416

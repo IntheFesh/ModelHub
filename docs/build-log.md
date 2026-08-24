@@ -688,4 +688,114 @@ A10（同一 session）
 值，等真实生产流量出现后再调"，唯一不算占位的是第一档 5%（PLAN.md
 原话）。
 ```
+
+```
+A11（同一 session）
+做了什么：
+  - bench/experiments/common.py —— `check_serving_precondition` 复用
+    A0 的 `assert_not_polluted`（严格超集，覆盖 degraded/contaminated
+    外加 git_dirty，见 DD-0023），`run_experiment_group_isolated` +
+    `ExperimentGroupOutcome`——PLAN.md"六组实验...每组独立、失败不
+    阻断、各自写 manifest"这句话对应的具体代码：捕获单组异常、记完整
+    traceback 到日志（`log_exception`，CLAUDE.md §8），把失败包成
+    显式 COMPLETED/FAILED 结果返回，不吞异常也不让一组的失败拖垮
+    另外五组。
+  - bench/experiments/vllm_metrics.py —— 真实 Prometheus 文本格式
+    解析（`parse_prometheus_counter`），group 2/3 共用；缺失的
+    counter 返回 `None`，不是编出一个 0。
+  - 【1】quantization.py —— AWQ/GPTQ/FP8 三方（NVFP4 排除，见
+    DD-0024）；`quantized_weight_bytes` 按 bit 宽度线性折算，喂给 A8
+    `estimate_max_concurrent_requests` 算"用显存换并发"，不是"省
+    显存%"；`quantize_model_checkpoint` 是三个真实量化库调用（AutoAWQ/
+    GPTQModel/llm-compressor），本沙箱没装这些库也没有 GPU，走的是
+    真实 ImportError→SKIP 分支（同 A5 kernel_status.py 的纪律）；
+    GPTQ 分支额外在 SKIP 之后留了一个 `NotImplementedError`（校准集
+    没有真实数据源可接，宁可硬失败也不编一个假校准集）；
+    `run_quantization_accuracy_check` 直接复用 A4 `run_eval` + A9
+    `run_admission_gate`，量化模型不是只看 perplexity；
+    `run_truncation_cross_experiment` 是 v2 新增的 thinking×量化
+    截断率对照，单元测试真的构造了一个 finish_reason="length" 的
+    fake client 验证截断率能从 0 变成 1。
+  - 【2】prefix_cache.py —— `build_interleaved_traffic` 实现"请求
+    交错度"（PLAN.md 明确禁止"同一个db连发1000次刷命中率"的易骗
+    做法），单测验证了 degree=1 时真的逐个切换 db、degree 够大时
+    真的退化成"同一个db连发N次"；命中率强制来自 vLLM 真实 metrics
+    （`measure_prefix_cache_hit_rate`，缺 counter 直接 raise，不
+    补 0）；`ArchitectureCacheComparison`（v2 新增）只是把 Arctic/
+    Qwen3.5 两组真实 `PrefixCacheStats` 并排放，不臆造折扣数字。
+  - 【3】speculative_decoding.py —— MTP（Qwen3.5 原生头）vs n-gram
+    （Arctic 无匹配 EAGLE 头）双路，`measure_concurrency_decay_curve`
+    复用 A8 `run_load_test` 在每个并发档位各测一次 QPS，
+    `SpeculativeDecayCurve.collapses_under_concurrency` 判断加速比
+    是否跌到 ≤1——元测试用一个刻意变慢的 fake speculative client
+    证明这个判断真的能触发，也用一个真的更快的 client 证明它不是
+    永远红。
+  - 【4】constrained_decoding.py —— 手写 SQLite SELECT 子集 EBNF
+    语法（不含 DDL/DML/CTE/窗口函数，PLAN.md 明确说不写全量语法）；
+    `compile_sqlite_select_grammar` 是本轮唯一一个只受 GPU 缺失
+    间接影响、CPU 就能跑的真实调用（xgrammar 语法编译本身不需要
+    GPU），本沙箱没装 xgrammar，走真实 SKIP；`syntax_legality_rate`
+    专门取"非 SYNTAX"而不是复用 A4 `EvalMetrics.syntax_valid_rate`
+    （后者是 EXEC_OK 口径，混了 SEMANTIC/TIMEOUT），因为约束解码
+    只保证语法合法；`ConstrainedDecodingResult.execution_accuracy_
+    change` 的文档字符串专门写清"诚实边界"：语法合法不等于语义正确，
+    没做 schema 感知就照样能生成列名不存在的合法 SQL。
+  - 【5】engine_comparison.py —— vLLM/SGLang 都是 OpenAI 兼容
+    `/v1/completions`，直接复用 A4 `HttpModelClient` + A8
+    `run_load_test`，没有新写引擎专属客户端；TensorRT-LLM 不参与
+    对比，理由写进 DD-0025（SM120/121 上 FMHA cubin 缺失会回退
+    unfused MHA，且只能走 NGC 容器安装，两条理由缺一都不足以排除，
+    合在一起才是真正原因）。
+  - 【6】mfu_mbu_comparison.py（v2 新增）—— 直接复用 A7
+    `compute_mfu`/`compute_mbu`/`classify_bottleneck`，不重新发明
+    公式；`ArchitectureMfuMbuComparison` 把"省显存容量"（KV/token，
+    复用 A5 `kv_bytes_per_token`）和"省显存带宽"（MBU）显式拆成两个
+    独立属性，因为 PLAN.md 原话"Qwen3.5 省的是显存容量，不是显存
+    带宽"说的是两个不同的资源，混成一个数字会把这句话说岔。
+  - configs/bench/experiments/ 六个配置文件，每个都写清哪些字段是
+    FACTS.md/A8 已有的真实假设复用（GPU 显存预算、model_profiles 的
+    weight_bytes）、哪些是本轮新增的运营占位值、哪些字段（如
+    peak_bf16_flops/peak_bw_bytes_s）在真实运行前必须被
+    `hardware_bench.py` 的真实测量结果替换掉——不是能跑就算数的
+    随手数字。
+  - pyproject.toml 新增 `experiments` 可选依赖组
+    （autoawq/gptqmodel/llmcompressor/xgrammar）。
+  - Makefile 新增 `verify-a11-1`..`verify-a11-6` 六个独立目标
+    （PLAN.md"每组能单独 make verify-a11-<n>"的字面要求），显式目标
+    优先于 `verify-%` 模式规则，泛用的 `make verify-a11` 仍然跑
+    整个 tests/{unit,meta,smoke}/a11/。
+  - 单元测试 68 条（tests/unit/a11/）、元测试 7 条（tests/meta/a11/，
+    覆盖前置门槛的白名单纪律 + 推测解码收益衰减检测器能红两条主线）、
+    烟测 1 条（两组真实跑通、一组故意失败，证明编排器的隔离在端到端
+    场景下也成立）。`make verify-a11` 全绿；`make verify-a11-1`..
+    `verify-a11-6` 逐个验证过；mypy --strict 对 90 个源文件干净；
+    全项目 565 个测试全绿，无跨轮 regressions。
+
+遇到什么问题：
+  1. `tests/unit/a11/test_orchestrator.py` 与 A10 已有的
+    `tests/unit/a10/test_orchestrator.py` 撞了 basename——这正是 A7
+    踩过、当时加进了"每轮结束前跑一遍 basename 去重检查"这条纪律的
+    同一类 bug，这次流程本身逮住了它，改名成
+    `test_experiment_orchestrator.py` 后全项目测试套件恢复全绿。
+  2. GPTQ 那条测试最初写成"预期抛 NotImplementedError"，实际跑起来
+    才发现：本沙箱没装 gptqmodel，`quantize_model_checkpoint` 的
+    ImportError 兜底分支会在到达 NotImplementedError 之前就先返回
+    SKIP——`NotImplementedError`只有在 gptqmodel 真的装了、真的进到
+    "校准集没有真实数据源"这一步时才会触发，这台沙箱测不到那一分支。
+    照实现的真实分支顺序把测试改成断言 SKIP，并在测试里写清楚为什么
+    测不到 NotImplementedError 分支，而不是反过来改实现去凑一个
+    一开始想当然写的断言。
+  3. session 因上下文压缩重启后 shell 里的 venv 又没激活（同 A10 遇到
+    过的问题），第一次跑 `mypy src/modelhub` 又报了一堆假的
+    import-not-found——继续沿用 A10 定下的规矩：所有校验命令一律走
+    `.venv/bin/<tool>` 显式路径。
+
+怎么解决的：见上。
+
+测出什么数字：无。A11 六组实验没有一组产生可引用的真实数字——本沙箱
+既无 GPU 也无真实 vLLM/SGLang 服务实例；量化的"用显存换并发"、命中率、
+加速比、语法合法率提升、引擎吞吐对比、MFU/MBU 全部是真实公式/真实
+编排代码等一次真机 GPU 跑通。`configs/bench/experiments/*.yaml` 里
+除了少数直接复用 FACTS.md/A5/A8 已核实数字的字段外，其余全部标注
+"占位/估算，等真实测量替换"。
 ```
