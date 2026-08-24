@@ -190,3 +190,76 @@ D0 续续续（同一 session）
       查询、只是恰好命中空结果"的可能——这个占比应该被 A4 的评估报告
       单独统计，而不是被平均分掩盖。
 ```
+
+```
+A4（同一 session）
+做了什么：
+  - eval/model_client.py —— `ModelClient` Protocol + `GenerationResult`；
+    `HttpModelClient` 是真实的 OpenAI/vLLM 兼容 `/v1/completions` 客户端
+    （本沙箱无 GPU、无可连的模型服务，标 `requires_network`，未在本沙箱
+    实测，见 DD-0003）。`finish_reason == "length"` 是 CLAUDE.md §2.4
+    OUTPUT_TRUNCATED 判据的来源，在 model_client 层面就已经决定，
+    不是 eval 下游猜的。
+  - eval/gold_cache.py —— gold SQL 执行结果按
+    `(db_id, gold_sql_hash, db_file_hash)` 缓存（CLAUDE.md §7.1），
+    真实落盘到 `artifacts/cache/gold_exec/`，`db_file_hash` 是整个
+    db 文件内容的 sha256，文件一变哈希就变，不会踩着一个过期结果不放。
+  - eval/records.py —— `PredictionRecord`，`counts_toward_denominator`
+    是全项目准确率分母最终收口的地方：OUTPUT_TRUNCATED 和任何
+    UNDECIDABLE（含 HARNESS_*）都被排除在分子分母之外，SYNTAX/SEMANTIC/
+    TIMEOUT 算零分尝试但仍计入分母。
+  - eval/runner.py —— `run_one_sample`/`run_eval`，真实的
+    生成→执行→比对→落盘链路，`predictions.jsonl` 支持 `--resume-from`
+    式续跑（已记录的 `sample_id` 直接跳过），每条新记录都原子地重写
+    整个文件（`docs` 里写明了这是"eval 规模可接受、训练规模不可接受"
+    的显式取舍，不是没意识到 O(n) 重写的代价）。
+  - eval/metrics.py —— `compute_metrics`，HARNESS_* 占比 > 1% 直接
+    `raise HarnessErrorFloodError`，拒绝产出任何报告（CLAUDE.md §1.3
+    的"未测不算过"精神的另一种体现：系统性故障不该被平均成一个
+    看起来合理的低分）；`execution_accuracy` 分母为 0 时是 `None`，
+    不是 `0.0`。
+  - eval/report.py —— `render_report_markdown`/`write_report`，
+    两道硬门槛：manifest 被污染（`git_dirty`/`contaminated`/
+    `degraded`）直接复用 `common/run_manifest.assert_not_polluted`
+    拒绝；`REQUIRED_MANIFEST_FIELDS` 里任何一个字段是 `None`
+    直接 `ReportError` 并把缺失字段名全部列出来（不是只报第一个）。
+    报告正文第一行就显式印 tier，"denominator basis" 一节把
+    total/excluded/denominator 三个数字都摊开写，不让读者只看一个
+    孤零零的百分比。
+  - `common/errors.py` 新增 `ReportError` 类和
+    `REPORT_REQUIRED_FIELD_MISSING` 错误码。
+  - 单元测试 51 条（tests/unit/a4/）、元测试 6 条（tests/meta/a4/，
+    覆盖 CLAUDE.md §1.5 点名的 `test_eval_fails_on_exec_error_flood`
+    和 `test_report_rejects_missing_metric` 两条）、烟测 1 条
+    （tests/smoke/a4/，全链路跑通但规模缩到 4 条样本）。
+    `make verify-a4` 58 个用例全绿。
+
+遇到什么问题：
+  1. `GenerationResult` 最初继承裸 `pydantic.BaseModel` 而不是项目统一的
+     `ModelHubBaseConfig`，被
+     `test_generation_result_forbids_unknown_field` 真实跑挂发现——
+     裸 BaseModel 默认静默吞掉多余字段，正是 CLAUDE.md §4
+     "拼错的 key 必须报错"要防的问题（DD-0013）。
+  2. `run_eval` 最初的签名里有一个 `eval_tier` 参数，写完发现函数体
+     完全没用它——"接受了却不用"的坏味道，删掉了，tier 的归属改为
+     `RunManifest.eval_tier` + `report.py` 的硬校验（DD-0012）。
+  3. `gold_cache.py::_read` 反序列化时把 `payload["code"]` 当裸字符串
+     塞进 `ExecOutcome(code=...)`，没有转回 `ErrorCode` 枚举——虽然
+     `ErrorCode` 是 StrEnum，`==` 比较不受影响，但项目里大量代码用
+     `outcome.code is ErrorCode.SYNTAX` 做身份比较，反序列化出来的裸
+     字符串 `is` 永远为 False。写测试前review代码时自己发现的，
+     改成 `ErrorCode(payload["code"])`。
+  4. 为了证明"预测 SQL 执行失败时绝不会再去跑 gold SQL / 绝不会执行
+     被截断的 SQL"这类"跳过下游步骤"的行为是真实发生的，而不是相信
+     代码读起来像是这样，测试里用了真实函数的计数 spy（wrap 真实
+     `execute_isolated`/`get_or_execute`，照常真实执行，只是多计一次
+     调用次数）而不是替换成假实现——运行时验证代码路径，而不是
+     静态读代码猜代码路径。
+
+怎么解决的：见上。
+
+测出什么数字：无。A4 本身不产生任何性能/准确率数字（那是 A5 起
+serve/ 真实起服务之后的事）；本轮所有"数字"都是测试断言里的小规模
+构造值（4 样本/100 样本这类烟测/元测试规模),不满足 manifest 三个
+清洁位、不构成可对外引用的数字。
+```

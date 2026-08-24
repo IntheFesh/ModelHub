@@ -78,6 +78,12 @@ class ErrorCode(StrEnum):
     # (CLAUDE.md §7) --
     DATA_SPLIT_LEAK = "DATA_SPLIT_LEAK"
 
+    # -- eval: CLAUDE.md §3.4 — a report schema field marked required is
+    # None on the source manifest/metrics. The report generator must hard-
+    # fail and name the missing field(s), never emit a report that looks
+    # complete while quietly missing data. --
+    REPORT_REQUIRED_FIELD_MISSING = "REPORT_REQUIRED_FIELD_MISSING"
+
 
 # CLAUDE.md §2.3: the SQL exec six/seven-way split collapses to two buckets
 # that matter for GRPO reward masking and eval-report gating: is this the
@@ -150,3 +156,7 @@ class ConfigError(ModelHubError):
 
 class ManifestError(ModelHubError):
     """Raised by common.run_manifest on read/write/pollution violations."""
+
+
+class ReportError(ModelHubError):
+    """Raised by eval.report on missing required fields or polluted runs."""

@@ -306,3 +306,64 @@
 - 实测数字：无。`tests/unit/a3/test_official_baselines.py::
   test_bird_official_compare_collapses_duplicates_unlike_our_comparator`
   是"官方脚本折叠重复行"这条结论的可执行证明，不是转述。
+
+---
+
+## DD-0012 · eval_tier 的归属：run_eval 不接受也不丢弃它，report.py 才是唯一权威
+
+- 日期：2026-08-24 · Run: 无（A4 本轮不产生真实性能/准确率数字，
+  见下方"实测数字"）
+- 决策：`eval/runner.py::run_eval` 最初的签名里有一个 `eval_tier` 参数，
+  写完才发现它在函数体内完全没被使用——`run_eval` 到底跑的是 quick
+  还是 full，是"调用方传了哪份 `samples` 列表"这个事实本身决定的，
+  不是一个需要单独再传一次、且传错也不会被这层代码发现的字符串标签。
+  把这个参数删掉了：`run_eval` 只管生成/执行/比对/落盘，"这批预测属于
+  哪个 tier"这件事完全交给 `RunManifest.eval_tier`（写 manifest 时由
+  调用方显式指定）和 `eval/report.py`（`REQUIRED_MANIFEST_FIELDS` 里
+  硬性要求 `eval_tier` 非空，且报告第一行就把 tier 显式印出来）。
+- 考虑过：(a) 保留 `eval_tier` 参数，函数体内什么也不做，只是"因为以后
+  可能要用"预留一个位置；(b) 让 `run_eval` 自己校验 `eval_tier` 和
+  `samples` 数量/来源是否匹配（比如 quick 必须恰好 500 条固定子集）。
+- 为什么选：(a) 是"接受了却立刻丢弃"的典型坏味道——一个参数如果函数体
+  不读它，签名里出现它本身就是一种误导（调用方会以为传了就生效）。
+  (b) 把校验放错了层：`run_eval` 是一个不知道"BIRD Mini-Dev V2 的
+  500 条固定子集"这种数据集特定事实的通用执行器，让它去校验"这是不是
+  合法的 quick-tier 子集"会把 A1（data/）的知识硬编码进 A4（eval/），
+  违反 CLAUDE.md §9"禁止跨层反向 import"背后的分层原则。真正需要
+  "这份报告到底是哪个 tier"这个事实的唯一消费者是报告本身，
+  所以让 `report.py::assert_report_ready` 在渲染报告之前对
+  `manifest.eval_tier is None` 硬失败，比在更早的执行层加一个用不上的
+  参数更符合"字段该在谁的层里被强制"的原则。
+- 什么情况会失效：如果未来出现"运行时就要按 tier 切换行为"的真实需求
+  （比如 quick-tier 允许更激进的并发度、full-tier 必须限流保护
+  eval DB），`run_eval` 才需要真正读这个参数而不是转发它——到那时候
+  这个决策要重新评估，不是简单地把参数加回来。
+- 实测数字：无。`tests/meta/a4/test_report_rejects_missing_metric.py::
+  test_report_rejects_missing_eval_tier` 是"tier 缺失时报告生成器硬失败"
+  这条结论的可执行证明。
+
+---
+
+## DD-0013 · GenerationResult 用 ModelHubBaseConfig，不是裸 pydantic.BaseModel
+
+- 日期：2026-08-24 · Run: 无
+- 决策：`eval/model_client.py::GenerationResult` 最初直接继承
+  `pydantic.BaseModel`，没有走项目统一的 `ModelHubBaseConfig`
+  （`ConfigDict(extra="forbid", frozen=True, validate_default=True)`）。
+  这是本轮写
+  `tests/unit/a4/test_model_client.py::test_generation_result_forbids_unknown_field`
+  时被测试真实跑挂发现的——传一个拼错的多余字段进去，裸 `BaseModel`
+  默认 `extra="ignore"`，不报错也不提示，静默吞掉。这正是
+  CLAUDE.md §4 点名的"拼错的 key 必须报错"要防的那类问题：如果
+  `HttpModelClient.generate()` 解析真实 vLLM 响应时字段名对不上
+  （比如 vLLM 版本升级后 usage 字段改名），裸 BaseModel 会静默丢字段
+  而不是在开发阶段就暴露出来。改成继承 `ModelHubBaseConfig`，
+  同一个测试从失败变成通过。
+- 考虑过：无——这不是一个有多个合理选项的架构决策，是一处不该发生的
+  疏漏，唯一正确做法就是改成项目统一基类。之所以单独记一条 DD，
+  是因为它是"写测试而不是写完就自认为对"这条工作方式在本轮抓到的
+  一个真实、具体的例子，值得留痕而不是悄悄改掉。
+- 什么情况会失效：不适用（bug 修复，不是会过期的架构假设）。
+- 实测数字：无。测试本身就是证据：
+  `tests/unit/a4/test_model_client.py::test_generation_result_forbids_unknown_field`
+  修复前失败（`DID NOT RAISE ValueError`），修复后通过。

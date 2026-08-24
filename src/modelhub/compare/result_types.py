@@ -27,6 +27,11 @@ class UndecidableReason(StrEnum):
     TOO_LARGE = "TOO_LARGE"  # either side's ResultSet was truncated
     INTERNAL_ERROR = "INTERNAL_ERROR"  # the comparator itself raised
     INCOMPARABLE_SHAPE = "INCOMPARABLE_SHAPE"  # e.g. column counts can't be reconciled
+    # the gold SQL itself failed to execute (CLAUDE.md/A1: ~425/9428 of
+    # BIRD-train's gold SQL are known not to execute) — there is nothing
+    # to compare the prediction against, so correctness is unknowable,
+    # not "wrong". Set by eval/runner.py, not by the comparator itself.
+    GOLD_EXEC_FAILED = "GOLD_EXEC_FAILED"
 
 
 @dataclass(frozen=True)
