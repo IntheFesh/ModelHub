@@ -480,3 +480,33 @@
   test_real_routing_config_loads_and_is_labeled_an_estimate` 断言
   真实提交的配置文件里 `threshold_source == "estimate"`，防止有人
   以后不小心把这个字段悄悄改成 `"measured"` 却没有真的跑 A8。
+
+---
+
+## DD-0017 · MFU/MBU 计算函数不接受"没测就用规格值"的隐式兜底
+
+- 日期：2026-08-24 · Run: 无（A7 不产生真实性能数字）
+- 决策：`monitor/mfu_mbu.py::compute_mfu`/`compute_mbu` 的
+  `peak_bf16_flops`/`peak_bw_bytes_s` 是必填参数，函数内部没有
+  "调用方不传就用 209 TFLOPS / 1792 GB/s 规格值"这种默认值。真正的
+  测量函数（`hardware_bench.py::measure_bf16_tflops`/
+  `measure_memory_bandwidth_gbs`，从 `preflight.py` E1/E2 的真实
+  GEMM/memcpy 微基准重构而来）在测不出时返回 `status=SKIP` 和
+  `tflops=None`/`gbs=None`，调用方必须显式决定"没测出来就用文档估算值"
+  还是"没测出来就拒绝算 MFU/MBU"——这个决定不能被函数悄悄替调用方做了。
+- 考虑过：给 `compute_mfu`/`compute_mbu` 加 `peak_*: float | None = None`
+  加上"None 时退回 209/1792"的兜底逻辑，调用更省事。
+- 为什么不这么做：这正是 FACTS.md 自己反复强调的红线——"未校准"的算力/
+  带宽假设一旦被悄悄代入公式，算出来的 MFU/MBU 数字会看起来完全正常
+  （不会报错、不会是明显异常值），但已经不再是"这次运行实测的瓶颈画像"，
+  而是"文档估算值和真实吞吐量拼出来的四不像数字"。manifest 里专门留了
+  `measured_peak_tflops`/`measured_bw_gbs` 两个字段（A0 就定义好了），
+  就是为了让"这个 run 的峰值到底是测出来的还是假设的"这件事可追溯——
+  如果 MFU/MBU 函数自己悄悄兜底，这两个字段的意义就被绕过去了。
+- 什么情况会失效：如果未来某个场景下"用文档估算值算一个大概的 MFU/MBU
+  仅供排程参考"是合理需求（不是对外报告用），应该在调用方那一层
+  显式写清楚"这是估算值"，而不是改这两个函数本身加隐式默认——
+  调用方的显式选择永远应该留痕。
+- 实测数字：无。`tests/meta/a7/test_unmeasured_hardware_never_fabricates_a_manifest_value.py`
+  证明本沙箱真实测不出峰值时（`torch` 确实没装），这两个测量函数的
+  `None` 结果会原样传进 `RunManifest`，不会被替换成任何数字。

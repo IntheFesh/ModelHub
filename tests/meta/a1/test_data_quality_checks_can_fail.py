@@ -43,7 +43,9 @@ def test_split_leak_detector_stays_quiet_on_genuinely_disjoint_splits() -> None:
     assert_splits_disjoint(train, dev, [])
 
 
-def test_gold_exec_failures_all_fail_is_counted_not_hidden(bird_db_root: Path) -> None:
+def test_gold_exec_failures_all_fail_is_counted_not_hidden(
+    bird_db_root: Path, tmp_path: Path
+) -> None:
     # Inject samples whose gold SQL is guaranteed to fail (unknown table),
     # like a subset of BIRD's real 425 non-executing gold rows.
     doomed = [
@@ -55,6 +57,8 @@ def test_gold_exec_failures_all_fail_is_counted_not_hidden(bird_db_root: Path) -
     assert summary.exec_ok == 0
     assert len(failures) == 5  # every failure individually present, not just a count
 
-    out_path = write_gold_exec_failures(failures, dataset_version="meta-test-doomed")
+    out_path = write_gold_exec_failures(
+        failures, dataset_version="meta-test-doomed", artifacts_root=tmp_path / "artifacts" / "data"
+    )
     lines = out_path.read_text().strip().splitlines()
     assert len(lines) == 5

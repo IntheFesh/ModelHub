@@ -407,3 +407,83 @@ A6（同一 session）
 circuit_breaker 的阈值都在 YAML 注释里明确标成"占位运营值，等真实
 流量再调"，routing.yaml 的阈值标成 `threshold_source: "estimate"`。
 ```
+
+```
+A7（同一 session）
+做了什么：
+  - monitor/mfu_mbu.py —— `compute_mfu`/`compute_mbu` 是 FACTS.md §四
+    公式的直接代码化，`classify_bottleneck` 把"MBU 高+MFU 低=显存瓶颈"
+    这类定性判断变成显式、配置驱动的阈值判定（DD-0017）。
+  - monitor/hardware_bench.py —— 把 `preflight.py` E1/E2 的真实 BF16
+    GEMM / 显存 D2D copy 微基准重构成可复用函数（和 A5 把 G1/G2 重构成
+    `serve/kernel_status.py` 是同一个模式），测不出时返回 `SKIP` +
+    `None`，不产出未校准的数字。
+  - monitor/gpu_metrics.py —— 把 preflight D3 的 DCGM PROF 字段探测
+    （`dcgmi dmon`）和 nvidia-smi 查询重构成可复用函数；`NvidiaSmiSnapshot`
+    的字段刻意命名成 `*_time_occupancy_pct` 而不是 `*_utilization_pct`，
+    从命名上就防止这个数字被下游误当成工作量度量转述（FACTS.md §四：
+    `DCGM_FI_DEV_GPU_UTIL` 的官方定义是"过去采样周期内至少有一个 kernel
+    在执行的时间占比"，不是工作量）。
+  - monitor/cache_metrics.py —— `PrefixCacheStats`，命中率为 0 请求时是
+    `None` 不是假装成 `0.0`；这也是 DD-0001 选 vLLM 而非 SGLang 时
+    "固定 schema 前缀命中率高"这个论据第一次有了可以真实测量的落点。
+  - monitor/exporter.py —— `GatewayMetrics`，真实 `prometheus_client`
+    `CollectorRegistry`（不用全局默认 registry，因为同进程多实例/
+    并行测试会撞名），覆盖请求计数/延迟直方图、限流/配额拒绝计数、
+    熔断器状态（复用 A6 的 `CircuitState`）、MFU/MBU/prefix-cache
+    命中率仪表盘。PLAN.md"FastAPI 网关 + Redis + Prometheus/Grafana"
+    这条平台栈里 Prometheus 的部分。
+  - `configs/monitor/bottleneck_thresholds.yaml` —— 阈值明确标注"未经
+    真实 MFU/MBU 分布校准的占位值"，跟 A6 的运营参数配置同一套诚实标注
+    习惯。
+  - 单元测试 36 条（tests/unit/a7/）、元测试 2 条（tests/meta/a7/，
+    验证"测不出的硬件峰值"真的会在 manifest 上保持 `None`，不会被
+    悄悄替换成规格值）、烟测 1 条。`make verify-a7` 39 个用例全绿。
+
+遇到什么问题：
+  1. **本轮发现的一个跨轮次、影响全项目的真实 bug**：
+     `tests/unit/a7/` 里最初有一个 `test_configs_load.py`，和 A6 已经
+     存在的 `tests/unit/a6/test_configs_load.py` 重名。单独跑
+     `pytest tests/unit/a7` 完全正常，但跑全量 `pytest`（没有路径过滤）
+     时会报 `import file mismatch`——原因是 `tests/unit/a6/` 和
+     `tests/unit/a7/` 都没有 `__init__.py`（从 A0 起就是这个约定，
+     pytest 把这类目录当作顶层模块名的插入点），两个同名文件被当成
+     同一个顶层模块 `test_configs_load` 冲突。这是每轮单独跑
+     `make verify-aX` 测试永远不会暴露、只有跑全量回归测试才会撞见的
+     一类 bug——之前 A0-A6 因为没有出现过重名文件而侥幸没触发。
+     把 A7 的文件改名成 `test_monitor_configs_load.py` 解决了这一次，
+     但这是个会在后续任何一轮再次发生的结构性风险（只要两个不同轮次
+     恰好取了同一个测试文件名）。已经用
+     `find unit meta smoke -name "test_*.py" | xargs -n1 basename | sort | uniq -d`
+     确认目前项目里没有其它重名，后续每轮收尾前会用同一条命令复查。
+  2. 本沙箱没有 `nvidia-smi`/`dcgmi`（连 GPU 驱动栈都没装，比 A5/A7
+     "有 CUDA 但没装 fla/causal_conv1d"更进一步的"完全没有 GPU 相关
+     工具链"），`gpu_metrics.py` 的测试走的是真实的"命令不存在"分支
+     （`shutil.which` 真的返回 `None`），不是构造出来的。
+  3. 排查上面第 1 条时，顺手发现本地工作区里多了一个没被 git 追踪的
+     `tests/artifacts/data/...` 目录——查下来是 A1 的
+     `gold_validation.py::write_gold_exec_failures` 和
+     `pipeline.py::write_data_build_report` 一直硬编码相对路径
+     `Path("artifacts/data")`，没有像 `eval/report.py::write_report`/
+     `common/run_manifest.py::write_manifest` 那样开放
+     `artifacts_root` 参数——测试没显式指定输出目录时，产物就写到了
+     "当时进程 cwd 恰好是哪"，本该被 `.gitignore` 的 `artifacts/*`
+     挡住，但 cwd 一旦不是仓库根目录（比如曾经从 `tests/` 目录下跑过
+     一次 pytest），产物就漏到了 `tests/artifacts/`（`.gitignore` 的
+     `artifacts/*` 是相对仓库根目录的模式，不匹配 `tests/artifacts/*`）。
+     这是本项目至今唯一一处"产物路径依赖 cwd 而不是显式参数"的地方，
+     顺手补上了 `artifacts_root: Path = Path("artifacts/data")`
+     参数（跟 `write_report`/`write_manifest` 同一个默认值+可覆盖模式），
+     三个受影响的 A1 测试文件改成显式传 `tmp_path` 下的临时目录，
+     不再依赖进程 cwd；已删除误产生的 `tests/artifacts/` 和
+     `artifacts/data/`（后者本就在 .gitignore 里，删除只是清理本地
+     工作区，不影响仓库状态）。这不是 A7 的功能范围，但是在为 A7 收尾
+     确认 `git status` 时顺带抓到并修掉的真实一致性问题，没有留到
+     "以后再说"。
+
+怎么解决的：见上。
+
+测出什么数字：无。本沙箱无 GPU，`hardware_bench.py` 的两个测量函数
+在这里只能验证"真实测不出时诚实返回 None"这一条路径；真实 TFLOPS/
+带宽数字要等真机验证（DD-0003）。
+```

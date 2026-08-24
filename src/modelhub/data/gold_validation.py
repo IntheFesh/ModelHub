@@ -81,13 +81,22 @@ def validate_gold_sql(
     return summary, failures
 
 
-def write_gold_exec_failures(failures: list[dict[str, str]], *, dataset_version: str) -> Path:
+def write_gold_exec_failures(
+    failures: list[dict[str, str]],
+    *,
+    dataset_version: str,
+    artifacts_root: Path = Path("artifacts/data"),
+) -> Path:
     """Atomically write the failure dump. Never called with an empty list
     silently skipped — an empty list still writes an empty (but present)
-    file, so "the file is missing" never gets confused with "zero failures"."""
+    file, so "the file is missing" never gets confused with "zero failures".
+
+    `artifacts_root` defaults to the project convention but is overridable
+    so tests/callers never depend on the process's current working
+    directory for where this lands."""
     import json
 
-    path = Path("artifacts/data") / dataset_version / "gold_exec_failures.jsonl"
+    path = artifacts_root / dataset_version / "gold_exec_failures.jsonl"
     lines = [json.dumps(f, sort_keys=True, ensure_ascii=False) for f in failures]
     atomic_write_text(path, "\n".join(lines) + ("\n" if lines else ""))
     return path

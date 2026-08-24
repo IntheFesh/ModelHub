@@ -1,0 +1,12 @@
+# Thresholds for monitor/mfu_mbu.py::classify_bottleneck.
+#
+# Illustrative placeholder values consistent with FACTS.md's qualitative
+# reading ("MBU 高 + MFU 低 = memory-bound，这是正常且期望的状态" for
+# LLM decode) — NOT derived from any measured MFU/MBU distribution.
+# A8/A11's real bench runs (which actually compute MFU/MBU from measured
+# tok/s and measured peak TFLOPS/bandwidth) are what should calibrate
+# these, once real prefill/decode measurements exist to calibrate against.
+
+memory_bound_mbu_min: 0.5
+memory_bound_mfu_max: 0.3
+compute_bound_mfu_min: 0.5

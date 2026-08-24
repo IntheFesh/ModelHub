@@ -42,6 +42,7 @@ def build_dataset_version(
     dataset_version: str,
     db_root: Path | None = None,
     validate_gold: bool = True,
+    artifacts_root: Path = Path("artifacts/data"),
 ) -> DataBuildReport:
     """Run the full A1 pipeline over an already-normalized sample list.
 
@@ -75,7 +76,9 @@ def build_dataset_version(
             )
         gold_summary, failures = validate_gold_sql(samples, db_root=db_root)
         if failures:
-            write_gold_exec_failures(failures, dataset_version=dataset_version)
+            write_gold_exec_failures(
+                failures, dataset_version=dataset_version, artifacts_root=artifacts_root
+            )
 
     content_hash = dataset_content_hash(samples)
 
@@ -91,7 +94,9 @@ def build_dataset_version(
     return report
 
 
-def write_data_build_report(report: DataBuildReport) -> Path:
-    path = Path("artifacts/data") / report.dataset_version / "dataset_summary.json"
+def write_data_build_report(
+    report: DataBuildReport, *, artifacts_root: Path = Path("artifacts/data")
+) -> Path:
+    path = artifacts_root / report.dataset_version / "dataset_summary.json"
     atomic_write_json(path, report.model_dump(mode="json"))
     return path
