@@ -82,3 +82,47 @@ D0 续（同一 session）
 `test_cpu_bound_cartesian_product_is_actually_killed_not_just_reported_slow`
 证明，不是数字，是行为断言）。
 ```
+
+```
+D0 续续（同一 session）
+做了什么：
+  - A1：data/ —— schema.py（NormalizedSample 统一 schema，BIRD/Spider
+    难度词表不强行对齐）、normalize.py（BIRD/Spider/Mini-Dev V2 三源归一化，
+    缺必填字段直接 KeyError 不静默）、dedup.py（问题级去重+SQL级去重计数，
+    只丢问题级重复）、hashing.py（question_hash/sql_hash/dataset_content_hash，
+    忽略大小写与空白但内容变了 hash 就变）、splits.py（(question_hash, db_id)
+    双键判定 train/dev/test 交集，命中即硬失败）、spider_hardness.py
+    （自研难度分类器，见 DD-0007，明确标注未验证）、gold_validation.py
+    （用 A2 的 sqlexec 真跑 gold SQL，失败样本逐条落盘不是只给个数字）、
+    quick_eval.py / safety_adversarial.py（500 条快评 + 270 条 CRUD
+    对抗集导出，互相校验 source 不能混）、pipeline.py（整轮编排 +
+    DataBuildReport）、downloader.py（真实 httpx/huggingface_hub 下载逻辑，
+    本沙箱验证不了，诚实标 requires_network）。37 个单元/元测试全绿
+    （2 个 requires_network 被显式 deselect，不是静默跳过）。
+
+遇到什么问题：
+  1. 一开始把"gold SQL 执行校验"放在 A1 里自己重新实现一个简化执行器，
+     写到一半意识到这和 A2 要造的沙箱在只读/超时/错误分类上是同一件事，
+     两份实现会在语义上飘走——改成让 A1 依赖 A2 的 sqlexec 公开 API，
+     并把 A2 提前到 A1 之前实现（DD-0004）。
+  2. Spider 官方数据集不带 difficulty 字段，且我记忆里对官方
+     `evaluation.py` 的确切阈值没有 100% 把握——没有选择"编一个看起来对的"
+     或者"假装记得很准"，而是自研一版并在代码和决策记录里反复标注
+     "未验证、不得对外引用"（DD-0007）。这是本轮最典型的一次
+     "不确定就说不确定"实践，而不是一次技术判断。
+  3. 写 `test_query_with_where_is_at_least_medium` 时断言错了——以为
+     "带 WHERE 就至少 medium"，实际按我实现的（也是 Spider 真实）方法论，
+     单个 WHERE 条件、没有别的复杂度分量，就是 easy。测试失败后确认
+     是测试的假设错了，不是分类器错了，改的是测试断言，不是放宽分类器
+     的判据去迁就一个错误的预期。
+  4. `build_dataset_version` 最初设计成 `db_root` 缺失时自动跳过 gold
+     校验并在报告里注明——落笔时意识到这正是 CLAUDE.md §1.3 要防的
+     "未测当通过"模式，改成硬 `FileNotFoundError`，要跳过必须显式
+     `validate_gold=False`（DD-0008）。
+
+怎么解决的：见上。
+
+测出什么数字：无（本轮不产生性能/准确率数字；BIRD 真实 425 条 gold
+执行失败的数字要等真机联网下载 BIRD 全量后用
+`validate_gold_sql` 实测才能拿到，目前只在 fixture 规模验证了机制本身）。
+```

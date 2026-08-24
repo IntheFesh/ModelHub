@@ -41,6 +41,24 @@ def sqlite_db(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.fixture
+def bird_db_root(tmp_path: Path) -> Path:
+    """A BIRD-shaped db_root: <db_root>/<db_id>/<db_id>.sqlite, used by both
+    tests/unit/a1 (gold validation) and tests/meta/a1 (data-quality checks)."""
+    db_dir = tmp_path / "school"
+    db_dir.mkdir()
+    db_path = db_dir / "school.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE students (id INTEGER PRIMARY KEY, name TEXT, gpa REAL)")
+    conn.executemany(
+        "INSERT INTO students VALUES (?, ?, ?)",
+        [(1, "alice", 3.5), (2, "bob", 3.0), (3, "carol", 3.8)],
+    )
+    conn.commit()
+    conn.close()
+    return tmp_path
+
+
 TEST_PG_DSN = (
     "host=127.0.0.1 dbname=modelhub_test user=modelhub_test "
     "password=modelhub_test connect_timeout=2"

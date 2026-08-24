@@ -18,6 +18,8 @@ dependencies = [
 [project.optional-dependencies]
 data = [
     "duckdb>=1.0",
+    "httpx>=0.27",
+    "huggingface-hub>=0.24",
 ]
 sqlexec = [
     "duckdb>=1.0",

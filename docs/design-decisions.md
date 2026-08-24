@@ -156,3 +156,55 @@
   `sqlite3` 版本（它跟 Python 解释器走），这是需要在 manifest 里记录
   Python 版本的原因之一。
 - 实测数字：无。
+
+---
+
+## DD-0007 · Spider 难度分类器：自研近似，明确标注未与官方脚本对齐
+
+- 日期：2026-08-24 · Run: 无（`make verify-a1` 34/34 + 3/3 元测试通过是产物）
+- 决策：Spider 官方数据集本身不带 difficulty 字段，`FACTS.md` 里引用的
+  easy248/medium446/hard174/extra166 是 Spider 官方 `evaluation.py`
+  的 `eval_hardness` 在评测时算出来的。本沙箱没有网络，拿不到那份脚本
+  做逐样本比对，所以 `data/spider_hardness.py` 按公开可查的方法论
+  （WHERE/GROUP BY/ORDER BY/JOIN/OR/LIKE 计数 + 嵌套子查询 + 集合操作
+  + 聚合函数等）**自己重新实现**了一版，并在模块 docstring 与函数
+  docstring 里明写：这是"未经验证的近似"，不是官方脚本的精确复刻，
+  **不得**在任何报告/简历里把它的输出当作官方 Spider hardness 数字引用。
+- 考虑过：(a) 干脆不分类，Spider 样本的 difficulty 全部留 `None`；
+  (b) 尝试从记忆里精确复刻官方脚本的每一个阈值当作"就是官方实现"。
+- 为什么选：(a) 会让 A4 的"按难度分层报告"这个功能对 Spider 数据完全失效，
+  价值损失比"标注清楚的近似值"更大；(b) 是本项目反作弊条款最想防的那类
+  行为——把不确定当确定，把"记忆里大概是这样"包装成"官方实现"。
+  选择"自研 + 显著标注 + 待真机联网验证"，是 CLAUDE.md §12
+  "不确定就说不确定"的直接应用。
+- 什么情况会失效：真机联网后必须拿真实 Spider dev.json 跑一遍这个分类器，
+  和官方 `evaluation.py` 的输出逐条 diff；如果分布对不上
+  （不是 248/446/174/166 这个已知分布），要么调整阈值，要么干脆
+  换成直接 vendor 官方脚本而不是自己重写。这条 DD 在验证完成前必须
+  一直挂着，不能被后续轮次悄悄"当作已解决"。
+- 实测数字：无（自研分类器目前只有 5 条手造用例的单元测试，
+  不是与真实 Spider 数据的对齐验证）。
+
+---
+
+## DD-0008 · A1 的 gold SQL 校验拒绝"悄悄跳过"：db_root 缺失时硬失败而非降级
+
+- 日期：2026-08-24 · Run: 无
+- 决策：`build_dataset_version(..., validate_gold=True)` 在 `db_root` 是
+  `None` 或目录不存在时**直接抛 `FileNotFoundError`**，而不是打印一条
+  warning 然后把 `gold_validation` 悄悄设成 `None` 继续跑完整个 pipeline。
+  想要真的跳过，调用方必须显式传 `validate_gold=False`。
+- 考虑过：`db_root` 缺失时自动降级为"跳过校验，在报告里注明"。
+- 为什么选：这正是 CLAUDE.md §1.3"未测≠通过"要防的模式——一个默认参数
+  `validate_gold=True` 本意是"这项检查应该跑"，如果因为环境没准备好就
+  自动降级且不阻断流程，使用者很容易在 CI 或夜间队列里根本没注意到
+  这项关键的数据质量检查其实一次都没真的跑过。显式抛错逼着调用方要么
+  提供真实 db_root，要么用一个和"我知道我在跳过"语义完全对应的参数
+  主动做这个决定，而不是环境不对就默默改变行为。
+- 什么情况会失效：如果未来这个函数被大量自动化调用点使用、
+  且大多数调用场景本来就不需要 gold 校验（比如只是想测 dedup 逻辑），
+  这个硬失败可能显得啰嗦——那种场景下调用方应该显式传
+  `validate_gold=False`，而不是指望函数悄悄替它做这个决定。
+- 实测数字：无。`tests/unit/a1/test_pipeline.py::
+  test_build_dataset_version_requires_explicit_opt_out_of_gold_validation`
+  是这条决策的可执行证明。

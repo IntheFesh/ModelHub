@@ -74,6 +74,10 @@ class ErrorCode(StrEnum):
     # (A9) and its 270-CRUD adversarial set key off this code specifically.
     UNSAFE_STATEMENT = "UNSAFE_STATEMENT"
 
+    # -- data: train/dev/test must never share a (question, db_id) pair
+    # (CLAUDE.md §7) --
+    DATA_SPLIT_LEAK = "DATA_SPLIT_LEAK"
+
 
 # CLAUDE.md §2.3: the SQL exec six/seven-way split collapses to two buckets
 # that matter for GRPO reward masking and eval-report gating: is this the
