@@ -1304,3 +1304,111 @@ UNSAFE_STATEMENT 拉低效应）。这些数字全部来自本轮设计的、明
     真的低于 50% 准确率、真实回归是不是恰好只出现在"复杂"难度切片），
     只有真机训练+真机评估才能最终确认。
 ```
+
+```
+B4（同一 session）—— B-track 训练线继续，本轮不新建包，单文件
+`src/modelhub/train/dpo.py`，按 PLAN.md 原文字面要求
+做了什么：
+  - train/dpo.py —— 本轮真正的重量在偏好对构造（PLAN.md 步骤1-7），
+    不在 DPOTrainer 接线：
+    - `classify_prediction` 白名单式穷举分类：`EXEC_OK_CORRECT`（跑通
+      且对）/`EXEC_OK_INCORRECT`（跑通但错）/`EXEC_FAILED`（PLAN.md
+      字面的"语法错"——SYNTAX/SEMANTIC/TIMEOUT，外加 PLAN.md 原文没提
+      但同样明确是模型自己的错、明确比 EXEC_OK_INCORRECT 更差的
+      UNSAFE_STATEMENT，一起归进这一档而不是留着不处理）；对任何
+      未预期的 exec_code 硬抛异常，不做兜底分类（CLAUDE.md §1.3）。
+    - ★★ 系统错（HARNESS_DB_UNAVAILABLE/HARNESS_INTERNAL）/
+      UNDECIDABLE/OUTPUT_TRUNCATED 三类整条丢弃，`ClassifiedCandidate.
+      tier`为`None`、`discard_reason`必须非空（构造函数互斥校验）——
+      永远不会出现在任何一对偏好对的任意一侧。
+    - `build_preference_pairs_for_question`：只在不同 tier 之间配对
+      （同级内不配对），把每个问题内所有 kept 候选两两比较、tier 严格
+      更优的一方当 chosen；`PreferenceDatasetReport` 聚合
+      pair_count/tier_counts/discard_counts/exec_ok_correct_share。
+    - `assess_expected_dpo_benefit`：PLAN.md ★"如果「跑通且对」占比
+      已经很高，DPO 收益会很小——这个观察本身写进决策记录，比硬跑一遍
+      有价值"——把这句话做成真实计算 `exec_ok_correct_share` 并按
+      阈值给结论的函数，不是只在文档里定性描述（DD-0035）。
+    - `sample_k_candidates`：PLAN.md 步骤1"对 2000 个问题各采样
+      k=4 个 SQL"——直接复用 A4 `eval/runner.py::run_one_sample`
+      跑 k 次，没有为 B4 重新写一遍生成/执行/比对逻辑。
+    - `DpoSamplingConfig`（k/温度/max_tokens/timeout，PLAN.md 步骤7
+      "采样温度和 k 记进 manifest"——这些字段本身就会被
+      `compute_config_hash` 哈希进 manifest 的 `config_hash`，不需要
+      manifest schema 专门加字段）、`DpoTrainingConfig`（`lora_
+      target_modules`沿用 B1 全 32 层覆盖配置，PLAN.md ★ 步骤8）。
+    - `check_trl_available`/`build_dpo_config_kwargs`（真实 TRL
+      `DPOConfig`字段名，纯函数、不需要装 trl 就能测）/
+      `run_dpo_training`（guarded：trl 未装则真实拒绝；trl 已装的
+      分支目前是显式 `NotImplementedError`——`DPOTrainer`构造需要
+      真实加载的 model/tokenizer/`datasets.Dataset`，本沙箱一样都
+      没有，没有编一个未经验证的调用形状去凑"能跑"的假象）。
+    - "训完跑快评"（PLAN.md 步骤末）：直接复用 A4 `run_eval` +
+      快评固定子集，没有为 B4 写一个只是转发参数的包装函数。
+  - configs/train/dpo_sampling.yaml / dpo_training.yaml —— 两份真实
+    YAML，均验证过能被 `load_yaml_config` 正确加载；`beta=0.1`
+    标注为"TRL 自己常引用的默认值，本项目未调参"，不是隐式继承库
+    默认值。
+  - pyproject.toml —— `train` extra 新增 `trl>=0.9`，mypy overrides
+    新增 `trl.*`。
+  - 单元测试 26 条（tests/unit/b4/：`classify_prediction` 对每一个
+    真实 `exec_code`/`comparison_result` 组合穷举测过，包括"未预期
+    exec_code 硬抛异常"这一条；`sample_k_candidates` 用真实 SQLite db
+    + 真实 sqlexec/compare + 假 ModelClient 跑通 k=4 全流程）、元测试
+    4 条（tests/meta/b4/：系统错/UNDECIDABLE/截断三类样本即使是"唯一
+    替代候选"也真实不会进任何一对；同级四个候选真实产出零偏好对；
+    健康的混合 tier 输入真实产出非零偏好对，证明机制不是永远零对）、
+    烟测 1 条（tests/smoke/b4/：5 题×k=4，真实 sqlexec/compare 全程
+    跑通到 `PreferenceDatasetReport`+benefit 评估，缩小题量不换实现）。
+    `make verify-b4`（走泛用 `verify-%` 模式规则）三段全绿；
+    mypy --strict 对 117 个源文件干净；全项目 868 个测试全绿，无
+    跨轮 regressions；`check_no_cheating src`/`check_placeholders
+    docs src` 均干净。
+
+遇到什么问题：
+  1. `classify_prediction`最初用一个共享 `common: dict` + 双星号展开
+    构造 `ClassifiedCandidate`，mypy --strict 在多处报"参数类型不
+    兼容"（`dict[str, object]`展开丢失了每个字段各自的精确类型）。
+    改成一个局部闭包函数 `_classified(*, tier, discard_reason)`
+    显式传参，类型检查干净，代码量没有明显增加。
+  2. `PredictionRecord.exec_code`真实取值空间比 PLAN.md 三档描述
+    （跑通且对/语法对但结果错/语法错）多一种——`execute_isolated`对
+    predicted_sql 里出现 CRUD 语句时会返回 `UNSAFE_STATEMENT`（A9
+    安全闸同一机制），PLAN.md 原文没提这种候选该归哪一档。判断
+    "模型自己生成了危险语句"明确比"跑通但结果错"更差、又不是系统错
+    不该丢弃，归进 PLAN.md 字面的"语法错"档（重命名成更准确的
+    `EXEC_FAILED`，docstring 里显式说明这不是字面意义的语法错误）。
+  3. 写 `assess_expected_dpo_benefit` 时确认了这条判断该落在哪：
+    PLAN.md 原文说"这个观察本身写进决策记录，比硬跑一遍有价值"，
+    没有直接说"写成代码"——但既然决策记录要有数字支撑（CLAUDE.md
+    §12"不确定就说不确定"的反面是"确定的就该有真实数字"），把这个
+    观察做成真实计算的函数、DD-0035 引用它手写的示例性验证数字
+    （75% share，20 题×k=4 的合成配比），而不是在决策记录里凭空写
+    "预计会很高"。
+
+怎么解决的：见上。
+
+测出什么数字：无（无 GPU，本轮不产生任何真实 DPO 偏好对或训练数字）。
+DD-0035 里的 `exec_ok_correct_share=75.0%`/`pair_count=60` 来自本轮
+为验证 `assess_expected_dpo_benefit` 可用而手写的示例性合成候选集
+（20 题、k=4、3:1 正确:错误配比），不是任何真实 SFT 模型的采样结果，
+不得被当作 B1 真实模型的准确率引用。
+
+诚实清单：
+  - 没做：任何真实的 2000 题×k=4 采样（本沙箱没有真实 served 模型，
+    `HttpModelClient`未在这里被真实调用过）；真实 `DPOTrainer`
+    构造与训练（`run_dpo_training`目前对已安装 trl 的分支是显式
+    `NotImplementedError`，真实调用形状留给真机验证）；"训完跑快评"
+    这一步从未真实执行过（没有真实 DPO 训练产物可评）。
+  - 假设了什么：`UNSAFE_STATEMENT`归入 `EXEC_FAILED`档（PLAN.md
+    原文未提及这种候选，本轮基于"比跑通但错更差、不是系统错"的判断
+    自行归类，见上）；0.7 的 `exec_ok_correct_share`阈值是本项目
+    自定、未经真实数据验证的判断线（DD-0035"什么情况会失效"一节）。
+  - 已知局限：三级配对策略（同一问题内所有 kept 候选两两跨 tier
+    全配对，不是只取 top-1 vs rest）是本轮的设计选择，PLAN.md 没有
+    明确这一层实现细节该是全配对还是仅相邻 tier 配对——真机第一批
+    真实偏好对里，如果某些问题的候选高度集中在两三个 tier、全配对
+    产生的偏好对数量是否会因为重复样本对权重失衡影响训练效果，需要
+    真机训练+效果验证才能确认，本轮只保证"不同级不配对"这条硬约束
+    被遵守。
+```

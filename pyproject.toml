@@ -46,6 +46,7 @@ train = [
     "accelerate>=0.33",
     "datasets>=2.20",
     "mlflow>=2.15",
+    "trl>=0.9",
 ]
 experiments = [
     "autoawq>=0.2",
@@ -109,6 +110,7 @@ module = [
     "vllm.*",
     "causal_conv1d.*",
     "fla.*",
+    "trl.*",
 ]
 ignore_missing_imports = true
 

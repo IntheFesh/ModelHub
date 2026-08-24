@@ -1,0 +1,14 @@
+# train/dpo.py::DpoSamplingConfig — B4 preference-pair construction.
+#
+# k_samples_per_question=4 / sampling_temperature are PLAN.md's own
+# literal numbers ("对 2000 个问题各采样 k=4 个 SQL"); temperature>0 is
+# required for k independent samples to actually diverge — greedy
+# (temperature=0) would produce k identical candidates and zero
+# preference signal. max_tokens/generate_timeout_s are the same
+# operational defaults A4's eval configs use, not tuned for this round
+# specifically.
+
+k_samples_per_question: 4
+sampling_temperature: 0.8
+max_tokens: 512
+generate_timeout_s: 30.0

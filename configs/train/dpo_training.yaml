@@ -1,0 +1,34 @@
+# train/dpo.py::DpoTrainingConfig — B4 DPO training over B1's SFT LoRA.
+#
+# base_sft_adapter_path points at B1's real checkpoint output_dir
+# (configs/train/sft_qwen3_5_9b.yaml) — this path does not exist in
+# this sandbox (no GPU, B1 never actually trained), left as the real
+# path a GPU run would produce.
+# lora_target_modules is the identical full-32-layer list B1/B2/B3 all
+# reuse (train/gdn_lora_coverage.py's coverage requirement is
+# architecture-wide, not round-specific).
+# beta=0.1 is TRL's own commonly-cited DPO default, not tuned by this
+# project — flagged here rather than silently inherited from a library
+# default, per CLAUDE.md §4 (no hyperparameter defaults, everything
+# explicit in configs/).
+# lr/batch_size/seed/max_hours are explicit per CLAUDE.md §4.
+
+base_sft_adapter_path: "artifacts/train/sft-qwen3.5-9b"
+lora_target_modules:
+  - gate_proj
+  - up_proj
+  - down_proj
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - in_proj_qkvz
+  - in_proj_ba
+  - out_proj
+  - conv1d
+beta: 0.1
+lr: 0.000005
+batch_size: 2
+seed: 42
+max_hours: 4.0
+output_dir: "artifacts/train/dpo-qwen3.5-9b"
