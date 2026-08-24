@@ -606,3 +606,68 @@
   test_data_actually_unmodified_after_blocked_attempts` 在真实
   SQLite 上验证了"闸判定为 PASS"和"数据真的没被改"这两件事一致——
   不是只信任 exec_code，而是回头查了一遍表内容。
+
+---
+
+## DD-0021 · 灰度"到达 100%"和"完成"是两个不同的状态，不能合并
+
+- 日期：2026-08-24 · Run: 无（A10 不产生真实灰度数字，本沙箱没有真实
+  线上流量可观测）
+- 决策：`release/canary.py::try_advance_stage` 把"当前档已经在最后一档
+  （100%）"和"可以标记为 COMPLETED"分成两次独立判断：即使
+  `stage_index` 已经指向最后一档，也仍然要求在**这一档**再观测满
+  `min_requests_per_stage` 个请求，才会把状态从 `IN_PROGRESS` 翻成
+  `COMPLETED`。反映到编排层：`orchestrator.py::run_canary_cycle`
+  在"从 50% 推进到 100%"和"100% 观测完毕、正式收尾"之间，需要两轮
+  独立的健康检查周期，不是一轮。
+- 考虑过：把"stage_index 走到 len(stages)-1"本身当作完成信号，推进到
+  100% 的同一次调用里直接返回 COMPLETED，省一轮健康检查。
+- 为什么选：100% 阶段本身就是灰度要保护的对象之一——如果"推进到
+  100%"和"验证过 100%"是同一个动作，那么"在 100% 阶段观测到的健康
+  数据"就永远不会被用来做回滚判断，100% 这一档的自动回滚保护形同
+  虚设。PLAN.md 的"灰度 5% → 注入劣化 → 自动回滚"drill 没有明确排除
+  劣化发生在最后一档的场景，而这恰恰是影响面最大的一种（100% 流量
+  已经在受影响）。
+- 什么情况会失效：如果未来的运维流程认为"100% 只是一个终点标记，不
+  需要单独的健康周期"（比如上游已经有独立的、更细粒度的 100% 监控
+  覆盖这段时间），可以重新合并两个状态——但要显式记录这个权衡，不能
+  悄悄改行为。
+- 实测数字：无。写测试时最初按"一次调用即完成"的假设写的
+  `tests/unit/a10/test_canary.py::
+  test_try_advance_stage_completes_at_last_stage` 和
+  `tests/unit/a10/test_orchestrator.py::
+  test_healthy_traffic_at_last_stage_completes` 两条断言都跑红了——
+  照实现代码的真实行为改的测试，不是反过来改实现去迁就一开始写错的
+  断言。
+
+---
+
+## DD-0022 · 线上抽样"成功"的定义就是 sqlexec 自己的 EXEC_OK，不做二次筛选
+
+- 日期：2026-08-24 · Run: 无
+- 决策：`release/online_sampling.py::predictions_to_health_samples` 把
+  `succeeded` 定义为 `prediction.exec_code is ErrorCode.EXEC_OK`，
+  逐条覆盖 SYNTAX/SEMANTIC/TIMEOUT/OUTPUT_TRUNCATED/
+  HARNESS_DB_UNAVAILABLE/HARNESS_INTERNAL 全部计为"不成功"（`
+  is_harness_error` 单独另算，供 `RollbackConfig.
+  max_harness_error_rate` 区分"系统错"和"模型错"两类阈值）。
+- 考虑过：写这个函数的第一版时，`succeeded` 定义成了
+  `not p.is_harness_error and p.exec_code.value != "SYNTAX"`——只排除
+  语法错误，语义错误/超时之类没考虑，是写的时候顺手拍的一个不完整
+  条件，不是深思熟虑的选择。
+- 为什么改：CLAUDE.md §2.3 的六分类里，SYNTAX/SEMANTIC/TIMEOUT 三类
+  都是"模型错，reward = 0"这一档——线上灰度的画布上没有理由只挑
+  SYNTAX 特殊对待。一个金丝雀版本如果开始比稳定版本产生更多的
+  SEMANTIC 错误（比如换了新 schema 之后模型引用了不存在的列）或者
+  TIMEOUT（比如新版本生成的 SQL 更容易触发笛卡尔积），这本身就是需要
+  触发自动回滚的真实信号，不应该被排除在"成功"判定之外。
+- 什么情况会失效：如果未来产品决定某些错误类别对线上健康判定不重要
+  （比如 OUTPUT_TRUNCATED 已经在别处单独监控、不该重复计入这里的
+  error_rate），需要显式把它从"不成功"里摘出来、并在这里写清楚原因，
+  不能悄悄放宽这个定义。
+- 实测数字：无。`tests/unit/a10/test_online_sampling.py::
+  TestPredictionsToHealthSamples::
+  test_syntax_error_counts_as_not_succeeded_but_not_harness_error`
+  和同文件里 harness-error 的对照测试，一起验证了"模型错"和"系统错"
+  在这个转换里被分别记到了 `succeeded` 和 `is_harness_error` 两个
+  独立字段上，不会互相污染。

@@ -1,0 +1,10 @@
+# release/rollback.py::RollbackConfig — automatic-rollback thresholds.
+#
+# ILLUSTRATIVE placeholder operational values — not derived from any
+# measured production error-rate distribution (no live serving exists
+# in this sandbox). Tune against real canary traffic once available.
+
+min_sample_size: 30
+max_error_rate: 0.10
+max_harness_error_rate: 0.02
+max_latency_p99_s: 5.0

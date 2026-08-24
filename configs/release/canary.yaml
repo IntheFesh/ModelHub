@@ -1,0 +1,9 @@
+# release/canary.py::CanaryConfig — the staged rollout ramp.
+#
+# PLAN.md fixes the first stage at 5% ("灰度 5% → 注入劣化 → 自动回滚").
+# The rest of the ramp (25/50/100) and min_requests_per_stage are
+# reasonable operational defaults, not measured/mandated values — tune
+# once real production traffic volume is known.
+
+stages: [5, 25, 50, 100]
+min_requests_per_stage: 100

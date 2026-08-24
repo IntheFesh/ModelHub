@@ -602,3 +602,90 @@ A9（同一 session）
 真实的 accuracy/regression/truncation 数字；`configs/gate/admission.yaml`
 里除了 safety 阈值都标注了"占位待真实数据校准"。
 ```
+
+```
+A10（同一 session）
+做了什么：
+  - release/canary.py —— `CanaryConfig`（阶梯必须递增且以 100 收尾，
+    `model_post_init` 里显式校验，不留 `[5,25,50]` 这种漏了最后一档
+    的配置能悄悄通过的空子）、`route_canary_traffic`（`hashlib.sha256
+    (request_key) % 100 < canary_percentage`——同一个 request_key 永远
+    落在同一个臂上，不是 `random.random()`；重试请求/同一用户会话
+    不该在 stable/canary 之间跳变，这是灰度路由的真实要求，副作用是
+    测试里也不用去 seed 一个全局 RNG）、`CanaryRolloutState`（frozen
+    dataclass，`stage_index`/`requests_at_current_stage`/`status`）、
+    `start_rollout`/`record_canary_request`/`try_advance_stage`/
+    `mark_rolled_back` 四个纯函数，不带副作用，调用方自己负责用返回值
+    替换旧状态。
+  - release/rollback.py —— `CanaryHealthSample`（真实 sqlexec 分类事实：
+    succeeded/is_harness_error/latency_s，不是一个人工健康分）、
+    `RollbackConfig`、`summarize_canary_health`（复用 A8 的
+    nearest-rank 百分位算法算 p99 延迟）、`evaluate_canary_health`——
+    复用 A9 的 `GateDecision`/`GateResult` 三态而不是另起一个布尔
+    'should_rollback'：REJECT=该回滚，PASS=健康，NOT_APPLICABLE=样本
+    量不够、还不能判断（CLAUDE.md §1.3：没测够不能悄悄读成"健康"）、
+    `trigger_rollback` 调 A9 `ModelRegistry.mark_rolled_back` 真的把
+    注册表状态翻过去，不是只返回一个决策对象扔给调用方自己处理。
+  - release/online_sampling.py —— `sample_recent_predictions`（seeded
+    `random.Random(seed)`，CLAUDE.md §7"采样类评估必须记录 seed"）、
+    `predictions_to_health_samples`（`succeeded = exec_code is
+    EXEC_OK`，见 DD-0022）。
+  - release/orchestrator.py —— `run_canary_cycle` 把抽样→健康评估→
+    回滚/推进串起来：REJECT 触发真实回滚并把 rollout 状态标
+    ROLLED_BACK，NOT_APPLICABLE 原地不动等更多数据，PASS 才尝试推进
+    一档（推进到最后一档本身不算完成，见 DD-0021，需要在 100% 这一档
+    再跑一轮健康检查才 COMPLETED）。
+  - `configs/release/canary.yaml`（阶梯 `[5,25,50,100]`，第一档 5% 是
+    PLAN.md 原话，其余是合理运营默认值，非实测）、
+    `configs/release/rollback.yaml`（错误率/系统错误率/p99 延迟三个
+    阈值，同样标注"占位运营值"）。
+  - 单元测试 46 条（tests/unit/a10/：canary 状态机 19 条、rollback
+    健康评估 13 条、online_sampling 10 条、orchestrator 6 条，外加
+    共享 `fakes.py` 三个 PredictionRecord 构造器：healthy/failing
+    （模型侧 SYNTAX）/harness_error，让"模型错"和"系统错"两类信号在
+    测试里能分开构造）、元测试 2 条（tests/meta/a10/
+    test_canary_rollback_fires.py，见下）、烟测 1 条（完整两阶段
+    rollout：5%→100%→COMPLETED，注册表状态全程保持 DEPLOYED 不误伤）。
+    `make verify-a10` 49 个用例全绿；`mypy --strict` 对
+    `src/modelhub` 全量 80 个源文件干净；全项目 497 个测试
+    （不含 requires_gpu/requires_network）全绿，没有引入跨轮 regressions。
+
+遇到什么问题：
+  1. 写 `test_stage_out_of_range_rejected` 时想用 `[5, 150, 100]` 去测
+    "中间某一档超过 100"，结果发现这个用例根本走不到范围校验那一步——
+    `CanaryConfig.model_post_init` 先查 ascending，`[5,150,100]` 排序后
+    是 `[5,100,150]`，跟原序列不一致，直接在"必须递增"这一步就被拒了。
+    往回想了一下：只要"递增"和"末尾必须是 100"两条都成立，中间任何
+    一档就自动被夹在 `(0, 100]` 里，不可能单独超过 100——真正能触发
+    "超出范围"校验、又不提前撞上前两条校验的，只有非正数这一种情况。
+    把测试改成 `[-5, 50, 100]`，测的是校验链条里真正可达的分支，不是
+    凭直觉编一个"看起来应该触发"但实际到不了的用例。
+  2. 写 `try_advance_stage`/`run_canary_cycle` 的完成语义测试时，最初
+    假设"推进到 `stages` 里的最后一个值（100%）"和"标记为 COMPLETED"
+    是同一次调用发生的事——测试跑了两个红：`test_canary.py::
+    test_try_advance_stage_completes_at_last_stage` 和
+    `test_orchestrator.py::test_healthy_traffic_at_last_stage_completes`。
+    回去看实现代码：`try_advance_stage` 只有在"当前已经站在最后一档
+    **并且**这一档也观测满了 `min_requests_per_stage`"才会返回
+    COMPLETED——从上一档推进到 100% 的那次调用只是把 `stage_index`
+    指向了最后一档，状态仍是 `IN_PROGRESS`。这是实现代码本来就对的
+    设计（100% 阶段本身也需要被验证一遍才能收尾，见 DD-0021），是
+    测试断言写错了，不是代码需要改——照实现的真实行为把两条测试改成
+    两轮调用，不是反过来放松实现去迁就一开始想当然写的断言。
+  3. session 因为上下文压缩重启后，shell 里的 venv 没有重新
+    `source .venv/bin/activate`，第一次跑 `mypy src/modelhub` 用的是
+    系统 Python，报了一堆 `pydantic`/`redis`/`duckdb` 等找不到模块的
+    假错误——不是真的代码问题，是环境没激活。后续命令统一改用
+    `.venv/bin/ruff`/`.venv/bin/mypy`/`.venv/bin/pytest` 显式路径，
+    不依赖 shell 状态跨 Bash 调用持久化（工具本身就说了 shell state
+    不持久化，只有 cwd 持久化）。
+
+怎么解决的：见上。
+
+测出什么数字：无。A10 不产生真实灰度流量或回滚事件——本沙箱没有真实
+线上服务、没有真实模型部署；`configs/release/canary.yaml` 和
+`configs/release/rollback.yaml` 里的阶梯档位与阈值都标注了"占位运营
+值，等真实生产流量出现后再调"，唯一不算占位的是第一档 5%（PLAN.md
+原话）。
+```
+```
