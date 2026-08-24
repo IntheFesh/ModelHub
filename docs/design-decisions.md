@@ -1114,3 +1114,41 @@
   `tests/meta/b5/test_reward_masking_can_fail.py`（参数化覆盖全部
   四种 mask 场景，包括 UNDECIDABLE）验证 `reward is None` 而不是
   `== 0.0`，可重复运行确认。
+
+---
+
+## DD-0037 · 每任务 manifest 只写给"真的跑过"的任务，不覆盖
+  SMOKE_TEST_NOT_PASSED/DEFERRED
+
+- 日期：2026-08-24 · Run: 无（`scripts/night_queue.py` 手动真实跑过
+  一次，产出见下方"实测数字"，不是模拟数字）
+- 决策：`scripts/night_queue.py::write_task_manifest` 只对
+  `status ∈ {COMPLETED, FAILED, INTERRUPTED}`（PLAN.md 项3 字面列出
+  的三个状态）写真实 manifest 文件；`SMOKE_TEST_NOT_PASSED`（烟测
+  未通过，含 FAIL 和 SKIP 两种子情况）和 `DEFERRED`（超配队列时间
+  预算耗尽后顺延）这两种"任务从未真正执行"的状态返回 `None`，不写
+  manifest，只出现在队列级心跳/快照里。
+- 考虑过：把 `QueueTaskStatus` 的全部六个值都塞进 PLAN.md 项3描述的
+  manifest schema，让 `status` 字段接受比原文列出的三个更宽的取值
+  集合。
+- 为什么不这么做：一个从未真正跑过的任务（烟测没过、或者时间预算
+  不够根本没轮到它），manifest 想报告的"这次执行的起止时间、真实
+  发生了什么"这类信息根本不存在——`started_at`/`ended_at`必然是
+  `None`，硬要为它生成一份 manifest，要么留一堆 `None`字段看起来
+  像"跑了但没记录完整"，要么诚实但违背 PLAN.md 原文对这个 schema
+  精确列出的三态定义。两种烟测未通过/时间预算不够的状态本身已经在
+  队列级`artifacts/queues/<date>.json`快照和每 15 分钟心跳里完整
+  记录，manifest 这一层没有必要重复越权表达"任务级"schema 没打算
+  覆盖的场景。
+- 什么情况会失效：如果未来有真实需求要对"被烟测拦下的任务"做单独的
+  归档追溯（比如统计"这个任务连续几晚都被烟测拦下"），那时候应该给
+  这类场景单独定义一个新的、诚实标注用途的记录格式，而不是硬塞进
+  项3这个专门给"真正跑过一次"的任务准备的 manifest schema里。
+- 实测数字：真实跑一次 `make night-queue`（3 个任务：2 个真实确定性
+  检查 + 1 个 HIGH 风险 GRPO 占位任务）产出
+  `artifacts/queues/20260824/manifests/`下恰好 3 份 manifest（2 份
+  COMPLETED、1 份 FAILED——GRPO 占位任务因为本沙箱没装 verl 诚实
+  失败，不是假装训练成功），没有为"从未执行"的场景生成任何 manifest
+  文件（本次真实运行里没有任务被烟测拦或被顺延，`tests/smoke/
+  night_queue/test_night_queue_smoke.py`专门用合成场景验证了这两种
+  "无 manifest"分支）。

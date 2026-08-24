@@ -1528,3 +1528,133 @@ B5（同一 session）—— B-track 训练线收尾，PLAN.md v2 微调版
     UNSAFE_STATEMENT 时（比如模型学坏了开始批量生成危险语句），
     reward 曲线会不会因此产生某种需要额外分析的模式，本轮无法验证。
 ```
+
+```
+夜间队列编排 night_queue.py（同一 session）—— PLAN.md 原文标注"单独
+session"，本轮是 CLAUDECODEPROMPTS.md 全部 19 轮里的最后一轮，收尾
+整个 A/B 两道工程
+做了什么：
+  - scripts/night_queue.py —— CLAUDE.md §6.2 八条要求逐条落地：
+    - `build_night_queue`：稳定排序按 `TaskRiskLevel`（LOW/MEDIUM/
+      HIGH）升序（项1），同风险任务保持调用方传入的相对顺序。
+    - `run_task_with_watchdog`：任何真实异常都被捕获转成 `FAILED`
+      outcome 而不是往外抛（项2"；语义不是&&语义"），队列循环因此
+      永远能走到下一个任务；`KeyboardInterrupt`（真实 SIGINT，以及
+      `_install_sigterm_as_keyboard_interrupt`把真实 SIGTERM 也转换
+      成同一异常）单独识别成 `INTERRUPTED`，且中断后队列不再继续
+      跑后续任务——因为是整个进程要退出，不是单个任务失败。
+    - `write_task_manifest`：只给真正跑过的任务（COMPLETED/FAILED/
+      INTERRUPTED，PLAN.md 项3 字面三态）写 manifest，`SMOKE_TEST_
+      NOT_PASSED`/`DEFERRED`两种"从未执行"状态不写（DD-0037）。
+    - watchdog 超时：`ThreadPoolExecutor`+`Future.result(timeout=…)`
+      （项4，复用 A2 `sqlexec/pool.py`同款并发原语解决"别让一个任务
+      卡住整条队列"），超时算 `FAILED`不是无声挂起。
+    - `time_budget_s`+循环内"预算耗尽→标记 `DEFERRED`"（项5超配+
+      顺延——真实队列在 `main()`里超配多少由调用方自己决定，这个
+      模块负责的是"超出预算的部分不丢、诚实标记"这一半）。
+    - `render_queue_snapshot`/`write_queue_snapshot`（项6，启动前
+      打印完整队列+预估耗时，落盘 `artifacts/queues/<date>.json`）。
+    - 烟测钩子 `NightTask.smoke_test: Callable[[], CheckStatus] | None`
+      ——直接复用 A0 `CheckStatus`白名单（PASS/FAIL/SKIP），只有
+      `PASS`才会真的调用 `task.run()`；`SMOKE_TEST_NOT_PASSED`这一个
+      状态同时覆盖 FAIL 和 SKIP，两者从不等同于 `COMPLETED`（项7 ★
+      "烟测跳过不得记为通过"，和 CLAUDE.md §1.5
+      `test_skip_is_not_pass`是同一条规则的直接代码化）。
+    - `write_heartbeat`：循环内按真实耗时每 `heartbeat_interval_s`
+      （默认 900s=15分钟）写一次，循环结束后无论如何再写最后一次
+      （项8——保证队列即使中途异常退出，磁盘上也有它最后的真实状态）。
+  - scripts/night_queue_fixtures/example_tasks.py —— 真实、安全可跑
+    的示例任务（pyproject.toml 里 mypy exclude 早在 Round 0 就已经
+    预留了这个目录，本轮确认并填上内容）：两个 LOW 风险确定性任务
+    直接 subprocess 调用本项目自己已有的 `check_no_cheating.py`/
+    `check_placeholders.py`（真实、安全、CPU-only，是"确定性任务"
+    的现成例子，不是编的占位任务）；一个 HIGH 风险占位任务演示
+    "真实 GPU 依赖任务该长什么样"——调用 B5 `check_verl_available`
+    真实探测，未装则诚实 `raise`，不是假装训练成功。
+  - Makefile 的 `night-queue` 目标（`$(PY) scripts/night_queue.py`）
+    在 Round 0 就已经存在，本轮第一次真正被填上内容并跑通。
+  - 手动完整跑通一次 `make night-queue`：3 个任务（2 个真实确定性
+    检查 COMPLETED + 1 个 HIGH 风险 GRPO 占位任务因为本沙箱没装 verl
+    诚实 FAILED），产出真实 `artifacts/queues/20260824.json`队列
+    快照、`artifacts/queues/20260824-heartbeat.json`心跳、
+    `artifacts/queues/20260824/manifests/`下 3 份真实每任务
+    manifest——不是构造的示例数据。
+  - 单元测试 20 条（tests/unit/night_queue/：`NightTask`验证、风险
+    排序稳定性、watchdog 的六种真实分支——健康完成/真实异常/
+    KeyboardInterrupt/烟测PASS/烟测FAIL/烟测SKIP/超时——队列快照
+    写入读回、manifest 只给三态写的边界情况）、元测试 2 条
+    （tests/meta/night_queue/：本轮自己的验收标准直接写成元测试——
+    队列中间一个必然失败的任务真实不阻断后续、且五个任务状态全部
+    正确记录；全健康队列证明机制不是永远卡在第一个失败上）、烟测 1
+    条（tests/smoke/night_queue/：真实超配队列+时间预算耗尽触发真实
+    DEFERRED顺延+真实烟测拦截，一次跑通验证风险排序/预算顺延/烟测
+    跳过/manifest 边界四件事）。`make verify-night_queue`（走泛用
+    `verify-%`模式规则，无需新增 Makefile 目标）三段全绿；
+    mypy --strict 对 `src/modelhub`125 个源文件干净，`scripts/
+    night_queue.py`/`example_tasks.py`单独跑 mypy 也干净（不在
+    CI 强制范围内，但保持同等质量标准）；全项目 949 个测试全绿，
+    无跨轮 regressions；`check_no_cheating src`/`check_placeholders
+    docs src`均干净，`check_no_cheating scripts`额外确认本轮新增
+    文件没有引入新 finding（scripts/ 下现有 5 条历史 finding 均与
+    本轮无关）。
+
+遇到什么问题：
+  1. `scripts/night_queue_fixtures/example_tasks.py`最初用
+    `from scripts.night_queue import ...`这种包限定路径导入，
+    mypy 报"Source file found twice under different module names"——
+    查了一下才发现本项目 `tests/conftest.py`早就把 `scripts/`目录
+    本身加进了 `sys.path`（供 `demo.py`/`bad_model_drill.py`这类
+    脚本被测试用裸模块名 `import demo`的方式导入），意味着
+    `scripts/`内部互相 import 也应该用裸模块名（`from night_queue
+    import ...`），不是当成一个真正的 `scripts.xxx`包。改成裸导入 +
+    给 `night_queue_fixtures/`补一个 `__init__.py`（让它自己能被
+    当包导入）后 mypy 干净。
+  2. 设计"watchdog：任务死亡后立即启动下一个"这条要求时，意识到本
+    项目里所有任务函数目前都是同步阻塞的 Python 可调用对象（不是
+    真的独立子进程/守护进程），"任务死亡"最贴近的真实含义是"这个
+    可调用对象抛出异常（包括真实子进程 `subprocess.run(...,
+    check=True)`崩溃时会转换成的 `CalledProcessError`）"——没有为了
+    显得"更像真实 watchdog"去引入一层不存在的进程级探活机制，而是
+    把"watchdog"的真实价值落在两处能验证的地方：循环本身不插入任何
+    人为延迟（下一个任务立即开始），以及一个可选的
+    `watchdog_timeout_s`安全网（`ThreadPoolExecutor`+
+    `Future.result(timeout=…)`）防止某个任务因为自己没写好内部
+    超时而挂住整条队列。
+  3. 每任务 manifest 该给哪些状态写，PLAN.md 项3 字面只列了三态
+    （COMPLETED/FAILED/INTERRUPTED），但 `QueueTaskStatus`为了实现
+    项5（超配顺延）和项7（烟测未过）额外多了 `DEFERRED`/
+    `SMOKE_TEST_NOT_PASSED`两个状态。写完 `write_task_manifest`
+    第一版时意识到如果对这两种"根本没跑起来"的状态也生成 manifest，
+    要么留一堆没意义的 `None`字段，要么就是在编造这次执行本不存在
+    的"起止时间"——改成只对真正跑过的三态写 manifest，另外两种状态
+    只在队列级心跳/快照里出现（DD-0037）。
+
+怎么解决的：见上。
+
+测出什么数字：`artifacts/queues/20260824.json`/`20260824-heartbeat.
+json`/`20260824/manifests/*.json`——一次真实 `make night-queue`
+跑出的队列编排产物（2 个真实反作弊/占位符检查 COMPLETED + 1 个 GRPO
+占位任务因本沙箱无 verl 诚实 FAILED）。这些是队列编排机制本身跑通的
+证据，不是任何训练/评估性能数字。
+
+诚实清单：
+  - 没做：真实的多小时超配夜间队列（本轮手动跑的示例队列只有 3 个
+    任务、几秒钟跑完，`time_budget_s=8*3600`从未真正被真实任务序列
+    填满过）；`watchdog_timeout_s`安全网从未在真实会挂起的任务上
+    触发过（单测里用 `time.sleep`模拟，不是真实训练/推理任务卡死的
+    场景）；真实 SIGTERM 信号从未在真实运行的 `make night-queue`
+    进程上发送/验证过（`_install_sigterm_as_keyboard_interrupt`的
+    信号处理器逻辑单测走的是直接 `raise KeyboardInterrupt`模拟，
+    不是真实操作系统信号投递）。
+  - 假设了什么：`example_tasks.py`里三个示例任务的
+    `estimated_duration_s`（30s/15s/8小时）是说明性占位数字，不是
+    任何真实测量；HIGH 风险 GRPO 占位任务的 `watchdog_timeout_s=60`
+    同样是示例值。
+  - 已知局限：这是 CLAUDECODEPROMPTS.md 全部 19 轮（Round0 + A0-A12
+    + B1-B5 + night_queue）里的最后一轮——整个项目从这里开始进入
+    "代码全部写完、等待真机验证"的状态，`docs/build-log.md`里累计
+    的"没做什么"清单（GPU 训练、真实模型推理、真实 rollout 等）在
+    真机拿到之前都不会自动解决，需要按 CLAUDE.md §0"所有对外声称的
+    数字必须能追溯到一次真实 run 的落盘产物"这条铁律，逐条真机复核
+    后才能对外引用。
+```
