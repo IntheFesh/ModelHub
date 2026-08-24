@@ -1,0 +1,89 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "modelhub"
+version = "0.1.0"
+description = "Multi-model LLM inference serving platform for Text2SQL"
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "pydantic>=2.6,<3",
+    "orjson>=3.9",
+]
+
+[project.optional-dependencies]
+data = [
+    "duckdb>=1.0",
+]
+serve = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "httpx>=0.27",
+]
+gateway = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "redis>=5.0",
+    "httpx>=0.27",
+]
+monitor = [
+    "prometheus-client>=0.20",
+]
+train = [
+    "torch>=2.4",
+    "transformers>=4.44",
+    "peft>=0.11",
+    "accelerate>=0.33",
+    "datasets>=2.20",
+]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest>=8.2",
+    "pytest-cov>=5.0",
+    "pytest-asyncio>=0.23",
+    "pre-commit>=3.7",
+    "types-redis",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/modelhub"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C90", "SIM", "RUF"]
+ignore = []
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.isort]
+known-first-party = ["modelhub"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+exclude = ["^scripts/night_queue_fixtures/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: pure-logic unit tests, no external services",
+    "golden: golden-set regression tests",
+    "smoke: small-scale end-to-end smoke tests",
+    "meta: meta-tests that prove a check can go red",
+    "requires_gpu: needs real GPU hardware, skipped in this sandbox",
+    "requires_network: needs external network (HF hub, model downloads)",
+]
+addopts = "-ra --strict-markers"
+
+[tool.coverage.run]
+source = ["src/modelhub"]

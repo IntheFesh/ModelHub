@@ -1,0 +1,39 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+build/
+dist/
+
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 落盘产物：数字必须可追溯到一次真实 run，但 artifact 本身不进版本控制
+artifacts/*
+!artifacts/.gitkeep
+!artifacts/README.md
+
+# 数据集本体不进仓库，只有 manifest/hash 进仓库
+data/raw/
+data/processed/
+*.db
+*.sqlite
+*.sqlite3
+
+# 训练产出
+checkpoints/
+*.safetensors
+*.bin
+adapters/*
+!adapters/.gitkeep
+
+.env
+.env.*
+*.log
+
+.DS_Store
