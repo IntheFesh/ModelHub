@@ -1,0 +1,25 @@
+# train/gdn_lora_coverage.py::GdnLoraCoverageConfig — the B1 hard
+# acceptance criterion. total_layers=32 is Qwen3.5-9B's real documented
+# layer count (FACTS.md/configs/serve/model_profiles/qwen3_5_9b.yaml).
+#
+# target_modules = FFN suffixes (present on every layer regardless of
+# attention type, PLAN.md's "覆盖全部 32 层" trick) + full-attention
+# suffixes + GDN suffixes (this project's best-documented understanding
+# of Qwen3-Next-family Gated DeltaNet naming — see
+# train/gdn_lora_coverage.py's module docstring for the naming-
+# uncertainty caveat, to be corrected against the real installed
+# transformers version's actual module tree on first real GPU run).
+
+total_layers: 32
+target_modules:
+  - gate_proj
+  - up_proj
+  - down_proj
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - in_proj_qkvz
+  - in_proj_ba
+  - out_proj
+  - conv1d

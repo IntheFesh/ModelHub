@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from modelhub.common.atomic_io import (
+    atomic_replace_dir,
     atomic_write_bytes,
     atomic_write_json,
     atomic_write_text,
@@ -65,3 +66,53 @@ def test_atomic_write_bytes_rejects_unwritable_target(tmp_path: Path) -> None:
     target = blocker / "child" / "out.json"
     with pytest.raises(ModelHubError):
         atomic_write_bytes(target, b"{}")
+
+
+class TestAtomicReplaceDir:
+    def test_replaces_a_directory_that_does_not_exist_yet(self, tmp_path: Path) -> None:
+        source = tmp_path / "checkpoint.tmp"
+        source.mkdir()
+        (source / "weights.bin").write_bytes(b"v1")
+        target = tmp_path / "checkpoint"
+
+        atomic_replace_dir(source, target)
+
+        assert target.is_dir()
+        assert (target / "weights.bin").read_bytes() == b"v1"
+        assert not source.exists()
+
+    def test_replaces_a_non_empty_existing_directory(self, tmp_path: Path) -> None:
+        target = tmp_path / "checkpoint"
+        target.mkdir()
+        (target / "weights.bin").write_bytes(b"old")
+        (target / "optimizer.bin").write_bytes(b"old-opt")
+
+        source = tmp_path / "checkpoint.tmp"
+        source.mkdir()
+        (source / "weights.bin").write_bytes(b"new")
+
+        atomic_replace_dir(source, target)
+
+        assert (target / "weights.bin").read_bytes() == b"new"
+        assert not (target / "optimizer.bin").exists()  # old checkpoint's files are gone
+        assert not source.exists()
+
+    def test_leaves_no_stale_directory_behind_on_success(self, tmp_path: Path) -> None:
+        target = tmp_path / "checkpoint"
+        target.mkdir()
+        source = tmp_path / "checkpoint.tmp"
+        source.mkdir()
+
+        atomic_replace_dir(source, target)
+
+        leftovers = [p for p in tmp_path.iterdir() if p.name != "checkpoint"]
+        assert leftovers == []
+
+    def test_rejects_a_source_that_is_not_a_directory(self, tmp_path: Path) -> None:
+        from modelhub.common.errors import ModelHubError
+
+        source = tmp_path / "not_a_dir.txt"
+        source.write_text("oops")
+        target = tmp_path / "checkpoint"
+        with pytest.raises(ModelHubError):
+            atomic_replace_dir(source, target)

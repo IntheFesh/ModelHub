@@ -1,0 +1,40 @@
+# train/dry_run.py::MemoryEstimateConfig — pre-flight OOM check for a
+# single A100-80G (PLAN.md B1 runs on 2xA100-80G; per-GPU budget is what
+# matters for a per-device batch OOM check, not the aggregate).
+#
+# gpu_memory_bytes/gpu_memory_utilization: same 0.9-ish safety-margin
+# convention A8's capacity_planning.yaml uses for the RTX 5090 (0.92) —
+# not a measured value, an operational ceiling.
+#
+# base_model_weight_bytes: Qwen3.5-9B's real documented weight size,
+# copied from configs/serve/model_profiles/qwen3_5_9b.yaml (kept in
+# sync deliberately, not re-derived).
+#
+# lora_trainable_param_bytes: PLAN.md's own B3 round states LoRA
+# adapters export at "~200MB" — used directly here rather than deriving
+# a param count from an unloaded model's exact matrix dimensions this
+# sandbox cannot inspect.
+#
+# optimizer_state_multiplier: Adam's 2 moments (m, v), same dtype as the
+# trainable param under this project's assumed bf16-throughout LoRA
+# training — 2.0x. A fp32 master-weight copy would add a further 1.0x;
+# not assumed here (documented, not yet confirmed against a real run).
+#
+# estimated_activation_bytes_per_token: ★ ILLUSTRATIVE, NOT MEASURED.
+# No GPU exists in this sandbox to measure real activation memory —
+# this constant exists only so estimate_training_memory() has a real
+# number to run its formula and unit tests against. The mandatory
+# 50-step smoke test (train/smoke_test.py) is what should replace this
+# with a real calibrated value from measured peak memory.
+#
+# fixed_overhead_bytes: CUDA context + misc runtime overhead, same
+# order of magnitude as FACTS.md's documented vLLM serving overhead
+# (2.5GB) — not independently measured for the training process.
+
+gpu_memory_bytes: 85899345920        # 80 GiB (A100-80G)
+gpu_memory_utilization: 0.9
+base_model_weight_bytes: 19327352832 # 18.0 GiB, from serve/model_profiles/qwen3_5_9b.yaml
+lora_trainable_param_bytes: 209715200 # 200 MiB, PLAN.md's own "~200MB" adapter size
+optimizer_state_multiplier: 2.0
+estimated_activation_bytes_per_token: 524288 # 512 KiB/token, ILLUSTRATIVE — see comment above
+fixed_overhead_bytes: 2684354560     # 2.5 GiB

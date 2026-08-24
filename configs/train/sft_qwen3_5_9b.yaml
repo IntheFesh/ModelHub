@@ -1,0 +1,54 @@
+# train/sft_config.py::SftConfig — B1's SFT run.
+#
+# model_name_or_path/dataset are PLAN.md's explicit choices (Qwen3.5-9B;
+# bird23-train-filtered + Spider train). template/cutoff_len are
+# reasonable operational choices pending confirmation against the real
+# LLaMA-Factory dataset_info.json/template registry once installed on a
+# real GPU machine (not installed in this sandbox).
+#
+# lr/batch_size/seed/max_seq_len are explicit per CLAUDE.md §4 (no
+# defaults in the pydantic model) — values below are reasonable starting
+# points for LoRA SFT on a 9B model, not tuned/measured results.
+#
+# max_hours=8.0 is an overnight-run budget (PLAN.md §6.3: "按时间预算跑
+# 不按 epoch 跑"), not derived from a real tok/s measurement — the
+# mandatory 50-step smoke test is what should recompute a real ETA and
+# invalidate this number (train/smoke_test.py's module docstring).
+#
+# checkpoint_interval_minutes=30 is PLAN.md's own literal number
+# ("checkpoint 原子写，每 30 分钟一次").
+#
+# thinking_mode MUST be false — PLAN.md item 10, also enforced by
+# SftConfig's own validator (a typo'd `true` here fails config loading,
+# not just a training-time surprise).
+
+model_name_or_path: "Qwen/Qwen3.5-9B"
+output_dir: "artifacts/train/sft-qwen3.5-9b"
+dataset:
+  dataset_name: "bird23_train_filtered_spider_train"
+  template: "qwen"
+  cutoff_len: 4096
+lora:
+  rank: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules:
+    - gate_proj
+    - up_proj
+    - down_proj
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - in_proj_qkvz
+    - in_proj_ba
+    - out_proj
+    - conv1d
+lr: 0.0002
+batch_size: 4
+seed: 42
+max_seq_len: 4096
+max_hours: 8.0
+checkpoint_interval_minutes: 30.0
+logging_steps: 10
+thinking_mode: false

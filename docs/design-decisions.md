@@ -853,3 +853,89 @@
   `tests/unit/a12/test_render_docs.py` 10 个用例验证了污染 run 会被
   正确排除、零 run 时六个核心数字里五个正确渲染成 PENDING、页面标注
   文案存在。
+
+---
+
+## DD-0029 · GDN 层分类用子模块名 pattern，不用硬编码层号
+
+- 日期：2026-08-24 · Run: 无（B1 本轮不产生训练数字，无 GPU）
+- 决策：`train/gdn_lora_coverage.py::LayerModuleInfo.layer_type` 按该层
+  实际出现过的子模块名后缀集合（`{q_proj,k_proj,v_proj,o_proj}` →
+  FULL_ATTENTION，`{in_proj_qkvz,in_proj_ba,out_proj,conv1d}` → GDN）
+  做分类，不硬编码"第 0/4/8/…/28 层是全注意力"这种索引表。
+- 考虑过：直接把 Qwen3.5-9B 的 8 个全注意力层索引写死成一个常量列表
+  （网上/论文里能查到 Qwen3-Next 系列大致是每 4 层一个全注意力层的
+  说法）。
+- 为什么不这么做：这个索引规律是本项目在无 GPU、无法加载真实模型的
+  沙箱里查到的二手信息，不是从真实 `model.named_modules()` 里验证过
+  的。如果硬编码索引和真实模型对不上（哪怕只差一层），
+  `assert_full_layer_coverage` 会拿着一份错的"应该覆盖哪些层"表去
+  比对，可能出现两种同样危险的假阳性/假阴性：真实模型里第 5 层其实
+  是 GDN 但索引表把它标成"预期全注意力因此可以不看 GDN 后缀"，或者
+  反过来。按子模块名后缀分类则完全不依赖索引规律是否正确——只要
+  `named_modules()` 里真实出现了 `in_proj_qkvz` 这类后缀，就归类为
+  GDN，规律错了也不影响分类结果的正确性，只可能影响"为什么第 N 层
+  是 GDN"这句解释是否精确。
+- 什么情况会失效：如果 Qwen3.5 真实架构里存在某一层同时含有
+  attention 后缀和 GDN 后缀（真正的混合层，而非"整层要么全注意力
+  要么 GDN"），当前 `LayerType` 二选一分类会需要扩展成第三种
+  HYBRID 状态——现在的实现假设两者互斥，这个假设本身也未经真实模型
+  验证，属于本轮已知局限。
+- 实测数字：`tests/unit/b1/test_gdn_lora_coverage.py` 用合成的
+  32 层模块名（8 全注意力 + 24 GDN）复现 PLAN.md 描述的确切故障场景
+  ——朴素 `[q_proj,k_proj,v_proj,o_proj]` 只训练 8/32 层，GDN 24 层
+  完全训练不到且无报错；`tests/meta/b1/test_gdn_coverage_gate_can_fail.py`
+  把同一朴素配置喂给真实 `run_sft_preflight` 编排器验证硬拒绝。
+
+---
+
+## DD-0030 · checkpoint 文件名与 HF Trainer 自身文件避免冲突
+
+- 日期：2026-08-24 · Run: 无
+- 决策：`train/checkpoint_state.py` 里本项目自己的续训状态文件命名为
+  `modelhub_trainer_state.json`，与 HuggingFace `Trainer` 自己的
+  `trainer_state.json`（`HF_TRAINER_STATE_FILENAME`，同样列入
+  `REQUIRED_CHECKPOINT_FILES`）并存，不复用同名；RNG 状态文件用
+  `rng_state.pth`（对齐 HF 真实约定），不是最初写的 `.pt`。
+- 考虑过：直接把本项目的续训元数据写进 `trainer_state.json`，省一个
+  文件。
+- 为什么不这么做：设计阶段自查发现这个文件名与 HF `Trainer` 自己
+  用来做断点续训的文件完全同名——如果本项目的写入逻辑覆盖它，会
+  静默破坏 HF 自己续训所需的状态（HF 读不到自己期望的字段，或者
+  本项目读到 HF 写的字段却当成自己的格式解析），而这个 bug 只有在
+  真实 GPU 上跑 `--resume-from` 才会暴露，本地测试用假 fixture 文件
+  完全测不出来。
+- 什么情况会失效：如果未来切换到不产出 `trainer_state.json` 的训练
+  框架（LLaMA-Factory 之外），`HF_TRAINER_STATE_FILENAME` 这条必需
+  文件约束需要重新核对，但 `modelhub_trainer_state.json` 这条本项目
+  自己的文件不受影响。
+- 实测数字：`tests/unit/b1/test_checkpoint_state.py` 11 个用例，其中
+  `test_all_required_files_present_by_construction` 断言
+  `REQUIRED_CHECKPOINT_FILES` 恰好 6 个文件（两个 trainer-state 文件
+  都在内）。
+
+---
+
+## DD-0031 · 显存预估常数标注为示例值，非实测
+
+- 日期：2026-08-24 · Run: 无（无 GPU，无法实测显存峰值）
+- 决策：`configs/train/memory_estimate.yaml` 里
+  `lora_trainable_param_bytes`（209715200，即 PLAN.md 原文给的
+  "~200MB" 估算）和 `estimated_activation_bytes_per_token`
+  （524288，本项目自己给的示例值，配置文件里显式标注★ILLUSTRATIVE，
+  NOT MEASURED）都不当作真实测量结果对外引用，只用于
+  `train/dry_run.py::estimate_training_memory` 的"第 0 步能不能启动"
+  粗筛（CLAUDE.md §6.3："OOM 要在第 0 步暴露，不是第 800 步"）。
+- 考虑过：省略 activation 显存这一项，只算权重+优化器状态——更简单，
+  但会系统性低估显存占用，粗筛形同虚设。
+- 为什么不这么做：一个精确但编造的数字比一个粗略但诚实标注"未实测"
+  的数字更危险——前者看起来像已验证的工程结论，容易被后续轮次或
+  文档直接引用；后者的存在本身就在提醒"50 步烟测必须重新测出真实
+  峰值显存，这个数字才能升级成 MEASURED"（`train/smoke_test.py`
+  三项验收标准之一就是显存峰值）。
+- 什么情况会失效：一旦真实 A100 上跑完 50 步烟测拿到真实峰值显存,
+  这两个常数应该从"示例值"升级为"来自 run_id=xxx 的真实测量"，并把
+  配置文件里的★ILLUSTRATIVE标注删掉。
+- 实测数字：`tests/unit/b1/test_dry_run.py::TestEstimateTrainingMemory`
+  用这组常数在 batch_size=4/max_seq_len=4096 下算出 headroom≈59.6%——
+  这是公式本身的正确性验证，不是显存占用的真实测量结果。
