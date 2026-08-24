@@ -68,6 +68,12 @@ class ErrorCode(StrEnum):
     IO_ATOMIC_WRITE_FAILED = "IO_ATOMIC_WRITE_FAILED"
     RUN_POLLUTED = "RUN_POLLUTED"
 
+    # -- sqlexec: a write attempt was rejected by the DB engine's own
+    # read-only enforcement. Not one of the SQL 7-class outcomes (it isn't
+    # "is this SQL correct", it's "is this SQL allowed") — the safety gate
+    # (A9) and its 270-CRUD adversarial set key off this code specifically.
+    UNSAFE_STATEMENT = "UNSAFE_STATEMENT"
+
 
 # CLAUDE.md §2.3: the SQL exec six/seven-way split collapses to two buckets
 # that matter for GRPO reward masking and eval-report gating: is this the

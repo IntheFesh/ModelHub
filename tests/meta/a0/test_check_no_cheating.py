@@ -59,6 +59,13 @@ def test_timeout_present_call_is_not_flagged() -> None:
     assert "NO_TIMEOUT_CALL" not in _rules(src)
 
 
+def test_differently_named_timeout_kwarg_is_accepted() -> None:
+    # psycopg's connect() timeout kwarg is `connect_timeout`, not `timeout` —
+    # this must not be a false positive (found via A2's own sqlexec code).
+    src = "import psycopg\ndef f(dsn):\n    return psycopg.connect(dsn, connect_timeout=5)\n"
+    assert "NO_TIMEOUT_CALL" not in _rules(src)
+
+
 def test_silent_slice_truncation_flagged_in_compare_dir() -> None:
     src = "def truncate(rows):\n    return rows[:1000]\n"
     assert "SILENT_SLICE_TRUNCATION" in _rules(src, path="src/modelhub/compare/scoring.py")

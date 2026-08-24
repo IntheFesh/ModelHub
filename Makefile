@@ -28,7 +28,7 @@ venv:
 	$(PIP) install --upgrade pip
 
 install: venv
-	$(PIP) install -e ".[dev,data,serve,gateway,monitor]"
+	$(PIP) install -e ".[dev,data,serve,gateway,monitor,sqlexec]"
 
 lint:
 	$(RUFF) check src tests scripts
@@ -53,19 +53,23 @@ check-placeholders:
 # make verify-a0, make verify-a1, ... make verify-b5
 # 约定：每轮的单元测试放 tests/unit/<id>/，元测试放 tests/meta/<id>/，
 # 烟测放 tests/smoke/<id>/。verify 目标三者都跑（存在才跑，不存在跳过并打印）。
+# ★ -m "not requires_gpu and not requires_network" 是本沙箱环境的显式豁免，
+#   不是"跳过=通过"：pytest 会把被排除的用例打印为 deselected，
+#   在真实 GPU/联网机器上应去掉这个过滤器跑全量。
+VERIFY_MARKEXPR := not requires_gpu and not requires_network
 verify-%:
 	@echo "════════════════════════════════════════════════════════════"
 	@echo " make verify-$*"
 	@echo "════════════════════════════════════════════════════════════"
 	@$(RUFF) check src/modelhub tests/unit/$* tests/meta/$* 2>/dev/null || $(RUFF) check src/modelhub
 	@if [ -d tests/unit/$* ]; then \
-		echo "-- unit --"; $(PYTEST) tests/unit/$* -v; \
+		echo "-- unit --"; $(PYTEST) tests/unit/$* -v -m "$(VERIFY_MARKEXPR)"; \
 	else echo "-- unit: 无 tests/unit/$* --"; fi
 	@if [ -d tests/meta/$* ]; then \
-		echo "-- meta（证明检查能红） --"; $(PYTEST) tests/meta/$* -v; \
+		echo "-- meta（证明检查能红） --"; $(PYTEST) tests/meta/$* -v -m "$(VERIFY_MARKEXPR)"; \
 	else echo "-- meta: 无 tests/meta/$* --"; fi
 	@if [ -d tests/smoke/$* ]; then \
-		echo "-- smoke --"; $(PYTEST) tests/smoke/$* -v -m "not requires_gpu and not requires_network"; \
+		echo "-- smoke --"; $(PYTEST) tests/smoke/$* -v -m "$(VERIFY_MARKEXPR)"; \
 	else echo "-- smoke: 无 tests/smoke/$* --"; fi
 
 smoke:

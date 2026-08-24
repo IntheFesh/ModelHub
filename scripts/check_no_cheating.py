@@ -169,7 +169,11 @@ class _Visitor(ast.NodeVisitor):
         if dotted:
             suffix_matches = [c for c in _TIMEOUT_SENSITIVE_CALLS if dotted.endswith(c)]
             if suffix_matches:
-                has_timeout = any(kw.arg == "timeout" for kw in node.keywords) or any(
+                # Accept any *_timeout kwarg (psycopg's is `connect_timeout`,
+                # redis's is `socket_timeout`, ...), not just literally `timeout`.
+                has_timeout = any(
+                    kw.arg is not None and "timeout" in kw.arg.lower() for kw in node.keywords
+                ) or any(
                     kw.arg is None
                     for kw in node.keywords  # **kwargs — can't prove absence
                 )
