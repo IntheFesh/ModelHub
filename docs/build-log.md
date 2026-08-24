@@ -545,3 +545,60 @@ A8（同一 session）
 既有结论的正确性验证，不是新测出的数字；成本模型的函数本身没有任何
 硬编码价格，等真实压测拿到 tok/s 之后才能算出真实数字。
 ```
+
+```
+A9（同一 session）
+做了什么：
+  - gate/types.py —— `GateDecision`（PASS/REJECT/NOT_APPLICABLE 三态，
+    不是裸 bool——"没有基线可比较回归"跟"比较过、确认没有回归"是两码事，
+    NOT_APPLICABLE 显式区分开）、`GateResult`/`GateVerdict`。
+  - gate/accuracy_gate.py（闸1）—— 绝对准确率下限，`execution_accuracy
+    is None`（分母为0）直接 REJECT，不当成"没数据所以先放过"。
+  - gate/regression_gate.py（闸2，CLAUDE.md §1.5 点名要求的回归检测器）
+    —— `find_regressions` 找出"基线答对、候选答错"的 sample_id 集合，
+    只在基线和候选都有的样本上比较；`check_regression_gate` 在没有
+    基线时返回 NOT_APPLICABLE（仅限第一个上线模型），不是默默当 PASS。
+  - gate/safety_gate.py（闸3）—— 直接对 270 条 CRUD 对抗样本的真实
+    gold_sql 跑一遍 sqlexec，验证平台只读保证本身（不是候选模型的
+    行为），见 DD-0020。
+  - gate/pollution_gate.py（闸4）—— 复用 A0 的 `RunManifest.is_polluted`。
+  - gate/truncation_gate.py（闸5）—— 输出截断率上限，呼应
+    MODEL-SELECTION-FINAL.md 陷阱2（量化+thinking 模式截断率飙升）。
+  - gate/admission.py —— 五道闸全部跑完不短路（DD-0019），
+    `AdmissionGateConfig` 汇总五份子配置。
+  - release/registry.py —— `ModelRegistry`，文件系统落盘
+    （`artifacts/registry/<model_id>/<version>.json`，原子写），
+    状态机 CANDIDATE→APPROVED/REJECTED→DEPLOYED→ROLLED_BACK，
+    每条记录带完整 `GateVerdict` 历史（不是只存最终 pass/fail 一个
+    bool）。非法状态迁移（比如没通过闸就想标 DEPLOYED）显式 `ValueError`。
+  - `configs/gate/admission.yaml` —— 除 `safety.max_allowed_unblocked: 0`
+    （这个不是占位值，是 A1 文档原话"270/270"的直接体现）外，其余阈值
+    明确标注"占位运营值，等真实 baseline 模型的 quick-eval 数字出来
+    再调"。
+  - 单元测试 36 条（tests/unit/a9/）、元测试 6 条（tests/meta/a9/，
+    覆盖 CLAUDE.md §1.5 点名的两个必需项 `test_gate_can_fail` /
+    `test_regression_detector_fires`，外加一条证明安全闸的 REJECT
+    分支本身可达、不是永远进不去的死代码）、烟测 1 条（门禁 + 注册表
+    全链路）。`make verify-a9` 43 个用例全绿。
+
+遇到什么问题：
+  1. "五道闸"具体是哪五道、"ckpt-A/B/D 分别被哪道拦下"的原始提示词
+     文本已经不在上下文里可查——从 PLAN.md/FACTS.md/
+     MODEL-SELECTION-FINAL.md 交叉印证，加上 Round 0 就写好的
+     `gate/__init__.py` 骨架 docstring（"five checks"）反推出这五道闸
+     的具体内容，并在 DD-0019/DD-0020 里写清楚推理依据，不是拍脑袋编的。
+  2. 安全闸最初设计成"跑模型生成 SQL，再看有没有被拦下"，写文档字符串
+     时意识到这个设计在系统保证下没有信息量（sqlexec 的只读连接让写
+     操作在机制上永远不可能成功，不管模型输出什么）——改成直接测
+     沙箱自身的只读保证（DD-0020），并专门写了一条元测试
+     （`test_safety_gate_can_fail.py`）证明这道闸的 REJECT 分支
+     不是永远进不去的死代码：用一个刻意"标记成对抗样本但其实是普通
+     SELECT"的样本，模拟"沙箱保证已经悄悄失效"这种情况，验证闸真的
+     会在这种情况下报 REJECT。
+
+怎么解决的：见上。
+
+测出什么数字：无。本沙箱没有真实候选模型/真实 baseline 模型可以跑出
+真实的 accuracy/regression/truncation 数字；`configs/gate/admission.yaml`
+里除了 safety 阈值都标注了"占位待真实数据校准"。
+```

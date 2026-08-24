@@ -550,3 +550,59 @@
 - 实测数字：无。`tests/unit/a8/test_capacity_planning.py::
   test_real_arctic_vs_qwen_profiles_reproduce_the_documented_crossover`
   和上面提到的元测试都是可执行验证，不是叙述。
+
+---
+
+## DD-0019 · 五道闸各自独立跑完，不因为前面一道拒绝就短路
+
+- 日期：2026-08-24 · Run: 无（A9 不产生真实门禁数字，本沙箱没有真实
+  候选模型可跑）
+- 决策：`gate/admission.py::run_admission_gate` 无论前面哪道闸已经
+  REJECT，五道闸（pollution/accuracy/truncation/safety/regression）
+  全部跑完，`GateVerdict.results` 里每一道都有结果，不是命中第一个
+  REJECT 就提前返回。
+- 考虑过：像大多数校验管线一样，第一道不过直接短路返回，省掉后面几道
+  的计算。
+- 为什么选：PLAN.md 明确写了门禁演练要验证"ckpt-A/B/D 被不同闸拦下"——
+  这个演练的价值恰恰在于"看清楚每一个坏 checkpoint 具体是被哪一道拦下
+  的"，如果 A 型坏模型（欠拟合）在准确率闸就短路返回，团队永远不会
+  知道它在安全闸/截断率闸上表现如何，也没法在一次门禁运行里同时验证
+  "这个 checkpoint 是不是恰好也在别的维度上有问题"。短路优化省的是
+  可忽略的计算量（本项目量级下五道闸都很便宜），换来的是诊断信息的
+  损失，不值得。
+- 什么情况会失效：如果未来某道闸本身开销很大（比如真的要跑一次完整
+  700B 参数模型推理），"全部跑完"的代价可能变得不可接受，需要重新
+  权衡是否要短路——但即便那时，更合理的做法也是把开销大的闸放到最后
+  一个跑，而不是恢复"命中即返回"。
+- 实测数字：无。`tests/unit/a9/test_admission.py::
+  test_low_accuracy_candidate_is_rejected_and_other_gates_still_run`
+  验证了 accuracy 闸 REJECT 之后，safety 闸依然真实执行并给出了
+  PASS——不是因为超时/异常侥幸跑到了，是设计如此。
+
+---
+
+## DD-0020 · 安全闸测的是沙箱的只读保证，不是候选模型的输出
+
+- 日期：2026-08-24 · Run: 无
+- 决策：`gate/safety_gate.py::check_safety_gate` 直接执行 Mini-Dev V2
+  270 条 CRUD 对抗样本各自的 `gold_sql`（真实的 DELETE/UPDATE/INSERT/
+  DROP 语句）通过真实的 `sqlexec.execute_isolated`，而不是先让候选
+  模型针对这些问题生成 SQL、再检查模型生成的 SQL 有没有被拦下。
+- 考虑过：跑模型生成 + 检查生成结果——这样"更像"是在评估模型行为。
+- 为什么不这么做：`data/safety_adversarial.py`（A1）的 docstring
+  原话是"a BI/analytics platform should reject 270/270 of these
+  outright"——这句话的主语是**平台**，不是模型；而且 A2 的
+  sqlexec 已经用只读连接从机制上保证任何真实写操作永远无法成功
+  （不管模型说什么），所以"检查模型生成的 SQL 有没有被拦下"这件事
+  的答案在系统设计层面已经是确定的"永远会被拦下"，拿它去评估模型
+  没有实际信息量。真正有价值、且会随时间变化（比如换了 sqlexec 后端、
+  改了连接参数、引入新 backend）的是"沙箱自身的只读保证是否还成立"——
+  这才是需要在每次模型上线前重新验证一遍的东西，跟具体候选模型是
+  哪一个无关。
+- 什么情况会失效：如果未来平台允许模型直接绕过 sqlexec（比如接入一个
+  不走本项目沙箱的外部执行通道），这道闸就测不到那条路径，需要针对
+  新通道单独补一道类似的闸，而不是简单复用这一个。
+- 实测数字：无。`tests/unit/a9/test_safety_gate.py::
+  test_data_actually_unmodified_after_blocked_attempts` 在真实
+  SQLite 上验证了"闸判定为 PASS"和"数据真的没被改"这两件事一致——
+  不是只信任 exec_code，而是回头查了一遍表内容。
