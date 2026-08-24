@@ -1204,3 +1204,103 @@ B2（同一 session）
     这条主链路只在烟测里用合成数据模拟过，没有一次是对着真实子进程
     输出走过的。
 ```
+
+```
+B3（同一 session）—— 本轮与 A9/A12 现成机制高度重合，规模明显小于
+B1/B2，按实际范围收敛（3个库模块 + 1个真实脚本，不是又一整套编排包）
+做了什么：
+  - train/bad_models/ 新包：`profiles.py`（三个 profile 的静态元数据——
+    怎么造/期望被哪道闸拦/为什么，ckpt-D 的 expected_gate 诚实写成
+    "accuracy（不是 PLAN.md 字面的 safety）"，见 DD-0034）、
+    `dataset_filters.py`（`filter_easy_only`——Spider easy + BIRD
+    simple，两个源各自的难度词汇不做跨数据集映射；`inject_crud_
+    samples`——复用 A9 safety_gate 同款 `Source.MINIDEV_CRUD` 校验）、
+    `training_configs.py`（ckpt-B/ckpt-D 的 200 步 LoRA YAML 渲染，
+    ckpt-A 无训练配置——PLAN.md"零成本"直接选早期 checkpoint）、
+    `checkpoint_selection.py`（`select_underfit_checkpoint`——真实
+    B1 `list_checkpoints` 输出里选最早一个）、`adapter_export.py`
+    （"只导出 LoRA adapter，不传合并权重"的真实可测门禁——检测到
+    `model.safetensors`/`pytorch_model.bin` 等合并权重文件存在时
+    硬拒绝导出，不是导出时静默忽略）。
+  - scripts/bad_model_drill.py —— 真实脚本（同 A12 `demo.py` 的规格：
+    真实数据 + 真实 A9 五道闸 + 真实 incident-log 写入，唯一不真实的
+    是"checkpoint 本身"，本沙箱没有 GPU 训不出来）。手动完整跑通一次：
+    ckpt-A（4/20 对，真实 20% 准确率）→REJECT(accuracy)；ckpt-B
+    （baseline 全对，candidate 10 道复杂题全错）→REJECT(regression)，
+    `find_regressions` 真实点名 10 个 sample_id；ckpt-D 两段式——(a)
+    真实 `check_safety_gate` 对两条真实 CRUD 对抗样本跑出 PASS（沙箱
+    强制执行本身没坏），(b) 真实 `execute_isolated('DELETE...')` 被真实
+    拦下（`UNSAFE_STATEMENT`），6 条这样的预测拉低准确率到 30%→
+    REJECT(accuracy)。三条真实 GATE_REJECTION 记录写进
+    `docs/incident-log.md`，两份真实训练 YAML 写进
+    `artifacts/bad_models/configs/`，`artifacts/bad_models/README.md`
+    从三个 profile 的真实 drill 结果生成，不是手打的静态文案。
+  - Makefile 新增 `bad-model-drill` 目标（同 `demo` 目标的调用形状）。
+  - 单元测试 32 条（tests/unit/b3/：profiles 5、dataset_filters 8、
+    training_configs 4、checkpoint_selection 2、adapter_export 5、
+    bad_model_drill 9——脚本的每个辅助函数都对着真实 tmp SQLite db
+    测过，不只测"构造函数不报错"）、元测试 4 条（tests/meta/b3/：
+    三个 profile 的真实失败信号各自真实触发 REJECT + 一个健康候选
+    走同一条真实 gate 路径证明不是永远红）、烟测 1 条（tests/smoke/b3/：
+    三个 profile 全部跑完 + incident 构造 + README 渲染端到端一条链，
+    不重复调用真实 `main()`——同 A12 demo.py 的先例，避免每次跑测试
+    都往真实 `docs/incident-log.md` 追加记录）。`make verify-b3`
+    （走泛用 `verify-%` 模式规则）三段全绿；mypy --strict 对 116 个
+    源文件干净；全项目 837 个测试全绿，无跨轮 regressions；
+    `check_no_cheating src`/`check_placeholders docs src` 均干净。
+
+遇到什么问题：
+  1. PLAN.md ckpt-D 原文说"期望被 GATE_SAFETY 拦"，写 profiles.py 之前
+    先读了一遍 `gate/safety_gate.py` 的真实实现和它自己的文档字符串，
+    发现这道闸门是平台自身只读强制执行的检查，"甚至不看候选模型会
+    生成什么"，和 PLAN.md 字面暗示的"候选模型的不安全 SQL 被这道闸
+    拦下"完全是两回事。没有为了凑字面描述去改 `check_safety_gate` 的
+    语义（那会破坏 A9 自己"平台完整性"这个独立检查维度），而是真的
+    跑了一遍脚本验证——喂真实 CRUD 对抗样本给真实安全闸，得到的确实
+    是 PASS 不是 REJECT；ckpt-D 真正会被拦下的机制是它自己预测的
+    DELETE 语句被真实 sqlexec 拦截（`UNSAFE_STATEMENT`），这类预测算
+    错误答案拉低 `execution_accuracy`，实际触发的是 accuracy 闸
+    （DD-0034）。这是本轮最有价值的发现，一半的价值就在"读代码验证
+    PLAN.md 的字面描述是否成立"这件事本身。
+  2. 一开始考虑给 B3 单独建一套类似 A11/B2 的 `experiments/`/编排包
+    结构，写完 profiles.py 之后重新评估发现 B3 实际复用面很大——三个
+    admission gate、CRUD 对抗集约定、checkpoint 文件约定、incident
+    log 写入器全部是 A9/A1/B1/A12 现成的，B3 真正新增的只是"怎么造出
+    这三种坏信号 + 怎么导出干净的 adapter"，按实际新增内容收窄成
+    3 个小模块 + 1 个真实脚本，没有为了显得"完整"硬凑一个不必要的
+    子包层级。
+  3. `export_adapter_only` 的"不传合并权重"检测最初只想在文档字符串
+    里提一句，写测试时意识到这必须是真实、可测的运行时检查——
+    `test_merged_weight_file_present_is_rejected` 真的往一个完整
+    checkpoint 目录里塞一个 `model.safetensors`，验证导出函数会真的
+    拒绝而不是静默忽略多出来的文件。
+
+怎么解决的：见上。
+
+测出什么数字：`docs/incident-log.md` 里三条真实的门禁拦截记录（来自
+一次真实跑通的 `make bad-model-drill`）——ckpt-A 20.00% 准确率、
+ckpt-B 10 个真实点名的回归 sample_id、ckpt-D 30.00% 准确率（含
+UNSAFE_STATEMENT 拉低效应）。这些数字全部来自本轮设计的、明确标注
+"engineered-but-real" 的演练用预测集，不是真实训练出的 ckpt-A/B/D
+的准确率——不得被当作任何真实模型的性能数字引用，只能引用"门禁演练
+机制本身跑通、产出了真实拦截记录"这个工程结论。
+
+诚实清单：
+  - 没做：ckpt-A/B/D 三个 adapter 的真实训练（本沙箱无 GPU，
+    `training_configs.py` 只写出了 ckpt-B/ckpt-D 的真实 LLaMA-Factory
+    YAML，ckpt-A 按 PLAN.md 要求走"直接选早期 checkpoint"零训练路径，
+    但 `checkpoint_selection.select_underfit_checkpoint` 从未对着一个
+    真实 B1 checkpoint 目录跑过——本沙箱没有真实 B1 训练产出）；
+    `export_adapter_only` 从未对着一个真实 LoRA adapter 导出过（单测
+    用的是 B1 checkpoint_state.py 同款合成 fixture 文件）。
+  - 假设了什么：`adapter_config.json` 是真实 PEFT/LLaMA-Factory 会
+    产出的文件名（`ADAPTER_ONLY_EXPORT_FILES` 里把它列为"存在就导出，
+    不存在不强制"，因为 B1 的 checkpoint_state.py 从未真正建模过这个
+    文件，这是本轮基于 PEFT 通用约定的补充假设，未经真实训练验证）。
+  - 已知局限：`scripts/bad_model_drill.py` 里 ckpt-A/B/D 的"预测集"
+    是本轮为了复现 PLAN.md 描述的失败信号手工设计的，不是真实模型
+    推理出来的——真实 ckpt-A/B/D 在真机上训出来后，它们的真实预测
+    分布是否恰好落在这里设计的信号形状里（比如真实欠拟合模型是不是
+    真的低于 50% 准确率、真实回归是不是恰好只出现在"复杂"难度切片），
+    只有真机训练+真机评估才能最终确认。
+```

@@ -1005,3 +1005,46 @@
   `== 0`）；`TestRequireMeasuredPeakMemory` 两个用例分别验证"有真实值
   就透传"和"是 None 就硬拒绝"；修复后 `scripts/check_no_cheating.py
   src` 重新跑一遍确认这一条 finding 消失，且未新增其他 finding。
+
+---
+
+## DD-0034 · ckpt-D 的真实拦截闸门是 accuracy，不是 PLAN.md 字面写的 safety
+
+- 日期：2026-08-24 · Run: 无（`scripts/bad_model_drill.py` 手动真实
+  跑过一次，产出见 `docs/incident-log.md`/`artifacts/bad_models/
+  README.md`，不是模拟数字）
+- 决策：`train/bad_models/profiles.py` 里 `CKPT_D_SAFETY` 的
+  `expected_gate` 字段诚实写成"accuracy（而不是 PLAN.md 字面写的
+  safety）"，`scripts/bad_model_drill.py` 的 ckpt-D 演练拆成两个真实
+  部分：(a) 真实 `check_safety_gate` 对着真实 CRUD 对抗样本跑，正确
+  结果是 PASS；(b) 一条真实的 `predicted_sql="DELETE ..."` 通过真实
+  `sqlexec.execute_isolated` 被真实拦下（`ErrorCode.UNSAFE_STATEMENT`），
+  这类预测被计入 `execution_accuracy` 的分母却不算对，真正拉低准确率
+  并触发 accuracy 闸拒绝。
+- 考虑过：按 PLAN.md 字面意思，直接断言 ckpt-D 会被 `GATE_SAFETY`
+  拦下，把 `check_safety_gate` 的输入换成"模型生成的不安全 SQL"而不是
+  A9 现有实现里的 `adversarial_samples`。
+- 为什么不这么做：读 `gate/safety_gate.py` 的真实实现和它自己的文档
+  字符串才发现——这道闸门"甚至不看候选模型会生成什么"("does not even
+  look at what the model would have generated")，测的是沙箱本身的
+  只读强制执行是否失效（比如换后端后忘了继续拦 DELETE），和候选模型
+  的输出完全无关。真的跑一遍 `scripts/bad_model_drill.py` 验证了这个
+  理解：把两条真实 CRUD 对抗样本喂给真实 `check_safety_gate`，得到的
+  是 PASS（0/2 unblocked），不是 REJECT——如果我按 PLAN.md 字面意思
+  硬断言"这会被 safety 拦"，这个断言会在真实代码面前直接失败，说明
+  PLAN.md 这句话本身对 A9 现有五道闸的实现是不成立的，不是我实现错了
+  ckpt-D。选择诚实记录这个差距（并且用真实执行证明"accuracy 闸才是
+  实际会拦下它的那道"），而不是悄悄改 `check_safety_gate` 的语义去
+  凑 PLAN.md 的字面描述——那样会破坏 A9 自己的设计意图（"平台自身的
+  只读强制执行是否失效"是一个和候选模型完全正交、同样重要的检查项，
+  混进候选模型行为判断反而让这道闸测的东西变得模糊）。
+- 什么情况会失效：如果 A9 未来真的新增一道"候选模型自身预测里
+  UNSAFE_STATEMENT 占比"的专项闸门（目前五道闸里没有），ckpt-D 的
+  `expected_gate` 应该更新为那道新闸门的名字，而不再是 accuracy 的
+  连带效应。
+- 实测数字：`scripts/bad_model_drill.py` 真实跑出的三条
+  `docs/incident-log.md` GATE_REJECTION 记录之一——ckpt-D 演练的
+  reason 是"accuracy: execution_accuracy 30.00% < required 50.00%"，
+  不是 safety；`tests/unit/b3/test_bad_model_drill.py::TestDrillCkptD`
+  和 `tests/meta/b3/test_drill_gate_can_fail.py` 里同一断言（safety
+  gate PASS + accuracy gate REJECT）在自动化测试里可重复验证。
