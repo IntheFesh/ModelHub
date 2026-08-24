@@ -243,3 +243,66 @@
   而不是止步于这里。
 - 实测数字：无。`tests/unit/a1/test_spider_hardness.py::
   test_limit_counts_toward_component1` 是这次修正的回归测试。
+
+---
+
+## DD-0010 · check_no_cheating 新增窄口径 allowlist 机制，而不是把整个文件排除扫描
+
+- 日期：2026-08-24 · Run: 无（`make verify-a3` 48/48 通过是产物）
+- 决策：`compare/official_baselines.py` 需要**忠实复刻** BIRD 官方评测脚本
+  的确切行为（包括它本身的缺陷：`except Exception: return 0`）用于一致率
+  对照，这个模式字面上会命中 `check_no_cheating.py` 的
+  `EXCEPT_RETURN_CONSTANT` 规则。没有整体跳过这个文件的扫描
+  （比如加进 `.check-no-cheating-ignore` 之类的文件级豁免），而是给
+  `check_no_cheating.py` 加了一个窄口径、要求写明理由的行内注释豁免：
+  `# check-no-cheating: allow=<RULE> reason=<必填>`，且必须精确匹配
+  被命中的那条规则名，不匹配就不生效；命中后仍然打印
+  （标 ALLOWLISTED，带 reason），只是不计入退出码。
+- 考虑过：(a) 整文件排除扫描；(b) 把返回值从 `0` 改成一个具名常量
+  `_SCORE_ZERO = 0` 从而在 AST 层面绕开"bare Constant"匹配。
+- 为什么选：(a) 会让这一整个文件失去反作弊扫描的保护——它除了这一处
+  "故意复刻缺陷"之外，其它任何真实 bug（比如误加了别的 except-pass）
+  都会被一起放过，代价太大。(b) 技术上能让扫描器不报，但那是在"迎合
+  检查器的字面规则"而不是"表达真实意图"——本质上是一种 gaming，
+  和反作弊条款的精神相反。窄口径 + 必填理由 + 精确规则名匹配，
+  是唯一既不削弱扫描器、又能诚实表达"这里的例外是有意的、有记录的"
+  的做法。顺手还用同样的思路给 `_example_rows`（截断调试用的差异行样例，
+  不是截断真实比对数据）加了一处豁免，并把截断上限显式写回返回的
+  data 里（呼应 `ResultSet.truncated` 的模式），而不是只靠注释说明。
+- 什么情况会失效：如果 allowlist 注释本身开始被滥用（比如理由写得很敷衍），
+  需要人工 code review 把关——这个机制只保证"豁免是显式的、可 grep 的"，
+  不保证"每个豁免理由都站得住脚"，后者仍然需要人读。
+- 实测数字：无。`tests/meta/a0/test_check_no_cheating.py` 里
+  `test_allowlist_comment_suppresses_the_named_rule_only` /
+  `test_allowlist_comment_does_not_suppress_a_different_rule` /
+  `test_allowlisted_finding_does_not_fail_main_exit_code` 三条元测试
+  覆盖了这个机制本身能不能正确工作（包括"规则名对不上就不生效"这个
+  防滥用的关键行为）。
+
+---
+
+## DD-0011 · 用真实的 BIRD 官方评测脚本做一致率对照，而不是假想的"官方脚本"
+
+- 日期：2026-08-24 · Run: 无
+- 决策：`compare/official_baselines.py` 是从
+  `AlibabaResearch/DAMO-ConvAI/bird/llm/src/evaluation.py`（MIT License）
+  真实抓取下来、逐行核对过的 `execute_sql` 函数复刻，不是凭印象写的
+  "差不多类似 BIRD 做法"的代码。一致率脚本
+  （`compare/consistency.py`）拿这份真实复刻和我们自己的比对器对照，
+  产出的分歧案例是真实分歧，不是编出来演示"我们比官方更严谨"的样例。
+  这也顺带核实了 FACTS.md/A3 面试预期问题"为什么不直接用官方脚本当
+  GRPO 奖励函数"的具体答案：官方脚本用 `set()` 比较——无浮点容差、
+  重复行被折叠成集合、行序永远不检查、任何异常一律记 0（分不清语法错/
+  语义错/超时/我们自己的 harness 挂了）。这些不是猜测，是读源码读出来的。
+- 考虑过：凭对 BIRD 论文/公开报告的印象写一个"差不多"的官方对照实现。
+- 为什么选：CLAUDE.md §12 的"不确定就说不确定"反过来也要求"确定的时候
+  别装作不确定"——本 session 已经证实 `raw.githubusercontent.com`
+  可连（DD-0009），继续凭记忆编一个"模拟官方脚本"而不是抓真实源码，
+  就是在明知可以核实的情况下选择不核实，这本身就是一种不诚实。
+- 什么情况会失效：DAMO-ConvAI 仓库后续更新了 `evaluation.py`
+  的比较逻辑（比如加了浮点容差），这份 vendored 复刻就会和最新官方版本
+  脱节，需要重新抓取核对——`official_baselines.py` 的 docstring 里
+  记了抓取日期（2026-08-24），方便以后判断是否该重新核对。
+- 实测数字：无。`tests/unit/a3/test_official_baselines.py::
+  test_bird_official_compare_collapses_duplicates_unlike_our_comparator`
+  是"官方脚本折叠重复行"这条结论的可执行证明，不是转述。

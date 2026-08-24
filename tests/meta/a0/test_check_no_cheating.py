@@ -5,6 +5,8 @@ the finding shows up; a final test proves clean code produces zero
 findings, so this file isn't just "always red".
 """
 
+from pathlib import Path
+
 from check_no_cheating import scan_source
 
 
@@ -101,3 +103,76 @@ def test_clean_code_has_zero_findings() -> None:
         "        raise RuntimeError('upstream timed out') from e\n"
     )
     assert _rules(src) == set()
+
+
+def test_except_return_none_is_not_flagged() -> None:
+    # `return None` is the project's own sanctioned "missing" sentinel
+    # (CLAUDE.md §1.1/§3.4), not a plausible-looking fake value like the
+    # `return 0.0` example CLAUDE.md actually warns about.
+    src = (
+        "def f(s):\n"
+        "    try:\n"
+        "        return float(s)\n"
+        "    except ValueError:\n"
+        "        return None\n"
+    )
+    assert "EXCEPT_RETURN_CONSTANT" not in _rules(src)
+
+
+def test_except_return_false_is_still_flagged() -> None:
+    # Confirms the None-exclusion is narrow: other plausible-looking bare
+    # constants (False, 0, "") must still be caught.
+    src = (
+        "def f():\n    try:\n        return check()\n    except Exception:\n        return False\n"
+    )
+    assert "EXCEPT_RETURN_CONSTANT" in _rules(src)
+
+
+def test_allowlist_comment_suppresses_the_named_rule_only() -> None:
+    src = (
+        "def f():\n"
+        "    try:\n"
+        "        return check()\n"
+        "    except Exception:\n"
+        "        # check-no-cheating: allow=EXCEPT_RETURN_CONSTANT reason=test fixture\n"
+        "        return False\n"
+    )
+    findings = scan_source(src, "src/modelhub/fake/module.py")
+    matching = [f for f in findings if f.rule == "EXCEPT_RETURN_CONSTANT"]
+    assert len(matching) == 1
+    assert matching[0].allowlisted is True
+    assert matching[0].allow_reason == "test fixture"
+
+
+def test_allowlist_comment_does_not_suppress_a_different_rule() -> None:
+    # The allow-comment names EXCEPT_PASS but the actual violation on this
+    # line is EXCEPT_RETURN_CONSTANT — must NOT be silently waived by a
+    # mismatched rule name (that would make the mechanism a blanket
+    # "make the checker quiet" tool instead of a scoped, honest waiver).
+    src = (
+        "def f():\n"
+        "    try:\n"
+        "        return check()\n"
+        "    except Exception:\n"
+        "        # check-no-cheating: allow=EXCEPT_PASS reason=wrong rule name\n"
+        "        return False\n"
+    )
+    findings = scan_source(src, "src/modelhub/fake/module.py")
+    matching = [f for f in findings if f.rule == "EXCEPT_RETURN_CONSTANT"]
+    assert len(matching) == 1
+    assert matching[0].allowlisted is False
+
+
+def test_allowlisted_finding_does_not_fail_main_exit_code(tmp_path: Path) -> None:
+    from check_no_cheating import main
+
+    f = tmp_path / "vendored.py"
+    f.write_text(
+        "def f():\n"
+        "    try:\n"
+        "        return check()\n"
+        "    except Exception:\n"
+        "        # check-no-cheating: allow=EXCEPT_RETURN_CONSTANT reason=test fixture\n"
+        "        return False\n"
+    )
+    assert main([str(tmp_path)]) == 0

@@ -18,6 +18,22 @@ and the A0 task list):
 Mock-only-in-tests (CLAUDE.md §1.4) is enforced separately: this script
 does not scan tests/, and a plain `import` grep for `unittest.mock` /
 `MockComparator`-style names under src/ is cheap enough to not need AST.
+
+## Allowlisting a specific finding
+
+A narrow, auditable escape hatch exists for the rare case where the
+flagged *shape* is correct but the intent is legitimate — e.g. faithfully
+porting a third-party reference implementation's exact behavior (see
+compare/official_baselines.py) rather than writing new sloppy code of our
+own. Put a comment matching this on the flagged line or the line above:
+
+    # check-no-cheating: allow=EXCEPT_RETURN_CONSTANT reason=<why, required>
+
+The reason is mandatory and kept verbatim in the report — this is not a
+blanket file-level suppression (no `# noqa`-with-no-explanation
+equivalent exists here), and an allowlisted finding still PRINTS, just
+under a separate "ALLOWLISTED" section that doesn't fail the exit code —
+grepping the codebase for every waiver used is always possible.
 """
 
 from __future__ import annotations
@@ -64,6 +80,9 @@ _TESTING_KEY_PATTERN = re.compile(r"TESTING|PYTEST|CI\b", re.IGNORECASE)
 _TODO_PATTERN = re.compile(r"#\s*(TODO|FIXME)\b", re.IGNORECASE)
 _FAIL_NAME_PATTERN = re.compile(r"(^|\.)(FAIL)$")
 _MOCK_IN_SRC_PATTERN = re.compile(r"\b(unittest\.mock|MockComparator|--fake-engine|FakeEngine)\b")
+_ALLOW_PATTERN = re.compile(
+    r"#\s*check-no-cheating:\s*allow=(?P<rule>[A-Z_]+)\s+reason=(?P<reason>\S.*\S|\S)\s*$"
+)
 
 
 @dataclass(frozen=True)
@@ -72,9 +91,15 @@ class Finding:
     path: str
     lineno: int
     message: str
+    allowlisted: bool = False
+    allow_reason: str | None = None
 
     def __str__(self) -> str:
-        return f"{self.path}:{self.lineno}: [{self.rule}] {self.message}"
+        tag = f"[{self.rule}]" if not self.allowlisted else f"[{self.rule}] (ALLOWLISTED)"
+        base = f"{self.path}:{self.lineno}: {tag} {self.message}"
+        if self.allowlisted:
+            base += f"\n        └─ reason: {self.allow_reason}"
+        return base
 
 
 def _call_dotted_name(node: ast.expr) -> str | None:
@@ -90,7 +115,15 @@ def _call_dotted_name(node: ast.expr) -> str | None:
 
 
 def _return_is_bare_constant(stmt: ast.stmt) -> bool:
-    return isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Constant)
+    # `return None` is excluded: CLAUDE.md §1.1's example is `return 0.0` /
+    # a *plausible-looking* fake value that would silently corrupt an
+    # average. `None` is the opposite — it is the project's own sanctioned
+    # "missing, not a guessed 0" sentinel (CLAUDE.md §1.1/§3.4), and a
+    # typed `-> X | None` return forces callers to handle absence
+    # explicitly rather than silently treating it as a value.
+    if not isinstance(stmt, ast.Return) or not isinstance(stmt.value, ast.Constant):
+        return False
+    return stmt.value.value is not None
 
 
 def _body_is_noop_pass(body: list[ast.stmt]) -> bool:
@@ -241,6 +274,36 @@ def _comment_lines_with_todo(source: bytes) -> set[int]:
     return lines
 
 
+def _allow_comments_by_line(source: str) -> dict[int, tuple[str, str]]:
+    """line number -> (allowed_rule, reason), for every `# check-no-cheating:
+    allow=RULE reason=...` comment found in the source."""
+    allowed: dict[int, tuple[str, str]] = {}
+    for lineno, line in enumerate(source.splitlines(), start=1):
+        m = _ALLOW_PATTERN.search(line)
+        if m:
+            allowed[lineno] = (m.group("rule"), m.group("reason").strip())
+    return allowed
+
+
+def _apply_allowlist(findings: list[Finding], source: str) -> list[Finding]:
+    allow_comments = _allow_comments_by_line(source)
+    if not allow_comments:
+        return findings
+    result: list[Finding] = []
+    for f in findings:
+        # the allow-comment may sit on the flagged line itself or the line above it
+        match = allow_comments.get(f.lineno) or allow_comments.get(f.lineno - 1)
+        if match and match[0] == f.rule:
+            result.append(
+                Finding(
+                    f.rule, f.path, f.lineno, f.message, allowlisted=True, allow_reason=match[1]
+                )
+            )
+        else:
+            result.append(f)
+    return result
+
+
 def scan_source(source: str, path: str) -> list[Finding]:
     tree = ast.parse(source, filename=path)
     in_compare_or_sqlexec = ("/compare/" in path.replace("\\", "/")) or (
@@ -261,7 +324,7 @@ def scan_source(source: str, path: str) -> list[Finding]:
                 "allowed in tests/ and must never be imported by src/ (CLAUDE.md §1.4)",
             )
         )
-    return findings
+    return _apply_allowlist(findings, source)
 
 
 def scan_file(path: Path) -> list[Finding]:
@@ -289,13 +352,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("paths", nargs="+", type=Path)
     args = ap.parse_args(argv)
 
-    findings = scan_paths(args.paths)
-    if findings:
-        print(f"check_no_cheating: {len(findings)} finding(s)\n", file=sys.stderr)
-        for f in findings:
+    all_findings = scan_paths(args.paths)
+    blocking = [f for f in all_findings if not f.allowlisted]
+    allowlisted = [f for f in all_findings if f.allowlisted]
+
+    if allowlisted:
+        print(f"check_no_cheating: {len(allowlisted)} allowlisted finding(s)\n", file=sys.stderr)
+        for f in allowlisted:
+            print(f, file=sys.stderr)
+        print(file=sys.stderr)
+
+    if blocking:
+        print(f"check_no_cheating: {len(blocking)} finding(s)\n", file=sys.stderr)
+        for f in blocking:
             print(f, file=sys.stderr)
         return 1
-    print("check_no_cheating: clean")
+    print(
+        "check_no_cheating: clean" + (f" ({len(allowlisted)} allowlisted)" if allowlisted else "")
+    )
     return 0
 
 

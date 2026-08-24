@@ -126,3 +126,67 @@ D0 续续（同一 session）
 执行失败的数字要等真机联网下载 BIRD 全量后用
 `validate_gold_sql` 实测才能拿到，目前只在 fixture 规模验证了机制本身）。
 ```
+
+```
+D0 续续续（同一 session）
+做了什么：
+  - A3：compare/ —— result_types.py（EQUAL/NOT_EQUAL/UNDECIDABLE 三态）、
+    config.py（七维度显式配置：column_match_mode/row_order/
+    null_equals_null/float_rel_tol+abs_tol/both_empty_is_equal/
+    duplicate_row_mode/type_mode）、comparator.py（核心比对逻辑，
+    出错或截断永不返回 EQUAL）、official_baselines.py（BIRD 官方
+    `evaluation.py` execute_sql 的忠实复刻，真实抓取源码核对，见
+    DD-0011）、golden_generator.py（生成 158 条合成对 + 3 条真实
+    跨方言执行对 = 161 条，expected 字段全部留空）、consistency.py
+    （对照我们的比对器与 BIRD 官方复刻，产出一致率与逐条分歧）。
+    给 check_no_cheating.py 加了窄口径 allowlist 机制（DD-0010）。
+    48 个单元/元测试全绿。真实生成了 `tests/golden/comparator_pairs.jsonl`
+    （161 行，可以直接交给人工裁定 expected 字段）。
+
+遇到什么问题：
+  1. `official_baselines.py` 里故意复刻 BIRD 官方的
+     `except Exception: return 0`（连同它的"任何异常都算错"这个已知缺陷）
+     被自己的 check_no_cheating.py 命中——不是绕过检查，是给检查器加了
+     一个要求写明理由、按规则名精确匹配的行内豁免机制（DD-0010），
+     两个新发现的规则误报（`_example_rows` 的调试用途截断、
+     official_baselines.py 缺 timeout）该改代码的改代码
+     （补 timeout、把截断显式写进返回的 data 里），该加豁免的加豁免，
+     不是笼统地把整个文件排除扫描。
+  2. `type_mode="strict"` 一开始没有真的生效——`_values_equal`
+     里数值容差分支写在 type_mode 判断之前，导致 strict 模式下
+     `1 == 1.0` 照样判 EQUAL；无序比较路径的 `_canonicalize_value`
+     则是另一个独立 bug：Python 自己的 `1 == 1.0`（且两者 hash 相等）
+     让基于 Counter/set 的比较天然把 int 和 float 揉一起，跟 config
+     完全无关。两个 bug 都是被
+     `test_strict_type_mode_distinguishes_int_float_string` 这条测试
+     真实跑挂之后才发现的——修法是给 strict 模式的规范化值加类型标签
+     （`("float", v)` / `(type(v).__name__, v)`），让它们在 hash 层面
+     就不可能撞上。
+  3. 生成真实跨方言对抗样本时，PostgreSQL 的整数除法 `1/2` 通过 psycopg
+     真实返回的是 `decimal.Decimal`，不是 float——`json.dumps(default=list)`
+     无法序列化 Decimal（TypeError: 不可迭代），直接崩溃。这不是编出来的
+     边界情况，是真实跑本地 PostgreSQL 撞出来的。改成显式识别
+     `decimal.Decimal` 转成字符串（保留精确文本值，不是有损的 float 转换）。
+
+怎么解决的：见上。
+
+测出什么数字：无（本轮不产生性能数字）。真实产物：
+`tests/golden/comparator_pairs.jsonl`（161 条候选对，expected 待人工裁定）。
+
+面试追问三层（A3，答案已有真实依据，非空想）：
+  - 为什么不直接用官方脚本当 GRPO 奖励函数？
+    → 见 official_baselines.py 与 DD-0011：官方脚本 `set()` 比较无浮点
+      容差、折叠重复行、不查行序、任何异常统一记 0。拿它当奖励函数，
+      模型会学到"结果集去重"和"浮点数不需要精确"这类噪声信号。
+  - "错判成对"和"对判成错"，哪个对训练更致命？
+    → 错判成对（应该 NOT_EQUAL 却判 EQUAL）更致命：它会让模型在真正
+      答错的样本上拿到满分奖励，且这类错误在训练曲线上完全不可见——
+      这正是 CLAUDE.md 反作弊条款要防的"看起来正常的假数据"。
+      "对判成错"至少会在验证集准确率上体现为一个可观察的下降。
+      这也是本比对器"出错/截断永远不返回 EQUAL"这条硬规则的直接依据。
+  - 空对空算相等吗？大量空对空会怎样？
+    → 默认算相等（`both_empty_is_equal=True`），但这是一个可关闭的显式
+      配置项，不是隐藏假设。大量空对空掩盖了模型"实际没有能力生成有效
+      查询、只是恰好命中空结果"的可能——这个占比应该被 A4 的评估报告
+      单独统计，而不是被平均分掩盖。
+```
