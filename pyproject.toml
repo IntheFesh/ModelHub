@@ -12,6 +12,7 @@ license = { text = "Apache-2.0" }
 dependencies = [
     "pydantic>=2.6,<3",
     "orjson>=3.9",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -47,6 +48,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "pre-commit>=3.7",
     "types-redis",
+    "types-PyYAML",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -59,7 +61,9 @@ src = ["src", "tests", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C90", "SIM", "RUF"]
-ignore = []
+# RUF002/RUF003: many docstrings/comments quote CLAUDE.md verbatim, including
+# full-width Chinese punctuation — that punctuation is correct there, not a typo.
+ignore = ["RUF002", "RUF003"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10
