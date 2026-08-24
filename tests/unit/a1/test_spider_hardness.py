@@ -36,3 +36,13 @@ def test_complex_join_group_by_having_is_harder_than_easy() -> None:
     )
     result = estimate_spider_hardness(sql)
     assert result is not SpiderHardness.EASY
+
+
+def test_limit_counts_toward_component1() -> None:
+    # Regression test for a real gap found when this classifier's threshold
+    # logic was checked against the actual vendored taoyds/spider
+    # evaluation.py: an earlier version didn't count LIMIT at all. A query
+    # with ORDER BY + LIMIT + one WHERE condition is component1=3, which
+    # must not be classified as EASY (component1<=1 required for easy).
+    sql = "SELECT name FROM students WHERE gpa > 3.5 ORDER BY gpa DESC LIMIT 5"
+    assert estimate_spider_hardness(sql) is not SpiderHardness.EASY

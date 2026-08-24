@@ -208,3 +208,38 @@
 - 实测数字：无。`tests/unit/a1/test_pipeline.py::
   test_build_dataset_version_requires_explicit_opt_out_of_gold_validation`
   是这条决策的可执行证明。
+
+---
+
+## DD-0009 · 修正 DD-0007："无网络"的判断过早，`raw.githubusercontent.com` 实际可连
+
+- 日期：2026-08-24 · Run: 无
+- 决策：在开始 A3（比对器要用到官方 BIRD/Spider 评测脚本做一致率对照）
+  之前，重新试探了一遍网络边界，发现 `huggingface.co` / 
+  `extensions.duckdb.org` 走的策略代理确实拦截，但 `raw.githubusercontent.com`
+  和 `api.github.com` 直接可连（200）。于是把真实的
+  `taoyds/spider/evaluation.py`（Apache-2.0）拉下来，逐行核对
+  `Evaluator.eval_hardness` 的四段 if/elif 阈值——**和我凭记忆写的 §DD-0007
+  阈值逻辑完全一致**，但也确认了两处此前没意识到的差距：(a) 官方版本会
+  把 `LIMIT` 计入 component1，我的正则版本完全没数它；(b) 官方版本靠
+  `process_sql.py`（依赖 NLTK 分词 + 数据库 schema）解析出结构化 SQL 后
+  数分量，我的版本是纯文本正则，对隐式 JOIN（`FROM a, b WHERE ...`）
+  和字符串字面量里恰好出现 "or"/"like" 的边界情况仍然不精确。
+  已修：补上 LIMIT 计数，并把 `spider_hardness.py` 的文档重写成精确区分
+  "阈值逻辑：已用官方源码核实" vs "分量计数：仍是文本近似"这两层置信度，
+  不再笼统说"整体未验证"。
+- 考虑过：既然能连 GitHub，要不要把 `process_sql.py` 一并 vendor 进来做到
+  字节级复刻？放弃——它依赖 NLTK 的 `word_tokenize`，而 NLTK 的分词模型
+  数据本身还要从另一个域名（通常是 nltk 自己的 S3/GitHub Releases）单独
+  下载，是否可连没有验证过，贸然引入一个新的、同样未经验证的网络依赖，
+  换来的收益（分量计数从"文本近似"变成"字节级精确"）在当前阶段不成比例。
+- 为什么选：这是"先怀疑自己的判断，再动手"的一个具体例子——上一条决策
+  （DD-0007）里"没有网络"这个前提本身就没有被验证到位（只测了
+  huggingface.co 一个域名就断言"没有网络访问真实 evaluation 脚本"），
+  属于过早下结论。CLAUDE.md §12 既要求"不确定就说不确定"，
+  也隐含着"要主动去核实能不能确定"，不是查一次就停。
+- 什么情况会失效：如果之后确认 nltk 的分词数据其实也能下载，DD-0007/
+  DD-0009 关于"分量计数仍是近似"的部分就该继续往前推进到字节级复刻，
+  而不是止步于这里。
+- 实测数字：无。`tests/unit/a1/test_spider_hardness.py::
+  test_limit_counts_toward_component1` 是这次修正的回归测试。
