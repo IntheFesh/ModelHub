@@ -1,6 +1,10 @@
-"""Model registry, canary rollout, automatic rollback, online sampling.
+"""Model registry, canary rollout, automatic rollback, online sampling,
+incident log.
 
-A9 owns `registry.py`; A10 owns everything else here.
+A9 owns `registry.py`; A10 owns canary/rollback/online_sampling/
+orchestrator; A12 owns `incident_log.py` (a real gap both A9 and A10
+left — "拦截记录 append-only 写 docs/incident-log.md" was never actually
+wired to a writer until now).
 
 Public API: `ModelRegistry`/`ModelStatus`/`RegistryEntry` (registry.py);
 `route_canary_traffic`/`CanaryConfig`/`CanaryRolloutState`/
@@ -12,7 +16,10 @@ rollback decision — PLAN.md's "灰度 5% → 注入劣化 → 自动回滚" dr
 `sample_recent_predictions`/`predictions_to_health_samples`
 (online_sampling.py, seeded/reproducible live-traffic sampling —
 CLAUDE.md §7); `run_canary_cycle`/`CanaryCycleResult`/`CycleAction`
-(orchestrator.py, ties the three together into one rollout cycle).
+(orchestrator.py, ties the three together into one rollout cycle);
+`IncidentRecord`/`IncidentType`/`append_incident`/
+`gate_rejection_incident`/`canary_rollback_incident`/`read_incident_log`/
+`count_incidents` (incident_log.py).
 """
 
 from modelhub.release.canary import (
@@ -25,6 +32,15 @@ from modelhub.release.canary import (
     route_canary_traffic,
     start_rollout,
     try_advance_stage,
+)
+from modelhub.release.incident_log import (
+    IncidentRecord,
+    IncidentType,
+    append_incident,
+    canary_rollback_incident,
+    count_incidents,
+    gate_rejection_incident,
+    read_incident_log,
 )
 from modelhub.release.online_sampling import (
     predictions_to_health_samples,
@@ -50,14 +66,21 @@ __all__ = [
     "CanaryRolloutState",
     "CycleAction",
     "GateResultRecord",
+    "IncidentRecord",
+    "IncidentType",
     "ModelRegistry",
     "ModelStatus",
     "RegistryEntry",
     "RollbackConfig",
     "RolloutStatus",
+    "append_incident",
+    "canary_rollback_incident",
+    "count_incidents",
     "evaluate_canary_health",
+    "gate_rejection_incident",
     "mark_rolled_back",
     "predictions_to_health_samples",
+    "read_incident_log",
     "record_canary_request",
     "route_canary_traffic",
     "run_canary_cycle",

@@ -799,3 +799,123 @@ A11（同一 session）
 除了少数直接复用 FACTS.md/A5/A8 已核实数字的字段外，其余全部标注
 "占位/估算，等真实测量替换"。
 ```
+
+```
+A12（同一 session）
+做了什么：
+  - release/incident_log.py —— 补上 A9/A10 都写了要做、都没真正接线
+    的 append-only `docs/incident-log.md` 写入器（DD-0026）：
+    `gate_rejection_incident`/`canary_rollback_incident` 从真实
+    `GateVerdict`/回滚原因构造记录，`append_incident` 走
+    读-改-原子写整份文件替换的模式（同 eval/runner.py 的
+    `_append_and_persist`），`count_incidents` 供交付检查表统计用。
+    刻意不在 `run_admission_gate`/`trigger_rollback` 内部加这个 I/O
+    副作用——保持这两个已交付、已测试的函数纯/薄副作用，让调用方
+    显式记录。
+  - gateway/app.py —— A6 写的六个模块（auth/rate_limit/quota/
+    circuit_breaker/routing/billing）第一次被真正串成一个可运行的
+    FastAPI 应用（DD-0027），顺序是鉴权→限流→路由→熔断→调用模型→
+    配额→计费，模块文档字符串写清每一步为什么在这个位置。同时接上
+    A7 的 `GatewayMetrics`（A6/A7 之间此前也没接过线）：每次请求记
+    latency+outcome，熔断器状态变化实时更新 Gauge，新增 `/metrics`
+    端点。配额检查放在生成之后（`quota.py`唯一入口需要本次请求的
+    真实 token 数才能判断，生成前不存在这个数）——DD-0027 写清这不是
+    绕开 PLAN.md"超额429"的字面意思，而是尊重 A6 已交付接口形状的
+    诚实实现，真正的前置检查需要给 `quota.py` 新增只读接口，记进
+    交付检查表的已知局限，不是这轮顺手改掉两轮前的模块。
+  - scripts/render_docs.py —— docs/ 下的性能数字第一次由脚本从
+    artifact/config 生成而不是手写（PLAN.md 明确要求）。三个页面，
+    两种"真实"分开标注（DD-0028）：`capacity-plan.md`/
+    `crossover-curve.md`是"PLANNING ESTIMATE"（公式真实，输入是文档
+    承认的估算值——真跑出来 Arctic-7B/Qwen3.5-9B 在 2000 tokens 交叉，
+    与 MODEL-SELECTION-FINAL.md 记载的 1k–3k 区间吻合），
+    `metrics-summary.md`是"PENDING"（六个核心数字里五个既无公式也无
+    真实 run，第六个即交叉点指向前两个页面）。`discover_runs`扫描
+    `artifacts/runs/*/manifest.json`，复用 A0 `RunManifest.
+    is_polluted`排除污染 run，不是重新发明一套判断。
+  - scripts/audit_pollution.py —— 复用 `render_docs.discover_runs`
+    的同一次扫描，输出可读报告 + 非零退出码（供 CI/`make verify-a12`
+    挂钩），不重新走一遍 artifacts/runs 的目录遍历。
+  - scripts/demo_stub_model_server.py + scripts/demo.py —— `make
+    demo`的完整实现："起服务→发请求→展示监控→触发一次门禁拦截→
+    展示incident-log"六步全部是真实代码路径：真实 FastAPI 网关应用
+    （TestClient 驱动，真实 ASGI 请求生命周期）、真实本地 Redis、
+    真实 sqlexec 执行 + compare 比对（对着真实 SQLite db）、真实
+    Prometheus `/metrics` 抓取、真实 A9 五道闸 REJECT verdict（喂
+    20/20 全错的候选）、真实追加 `docs/incident-log.md`。唯一不真实
+    的一环是"模型"本身——`demo_stub_model_server.py`是一个在模块
+    文档字符串里反复标"NOT A REAL MODEL"的固定响应桩，因为本沙箱
+    没有 GPU；这个桩活在 `scripts/`（不是 `src/modelhub/`），呼应
+    CLAUDE.md §1.4"mock 只能在 tests/"的精神——demo 专用的桩同样不
+    该混进真实包。手动完整跑通两次（子进程干净启动+终止，无残留
+    进程），docs/incident-log.md 里两条真实 GATE_REJECTION 记录就是
+    这两次跑出来的，不是编的示例。
+  - docs/architecture.md —— Mermaid 架构图，控制在能手画的复杂度
+    （请求路径 6 节点 + 离线训练路径 3 节点 + 发布路径 5 节点），
+    sqlexec/compare 因为是"四条链路共用"的横切模块、画出来会破坏
+    "简单"这个约束，在正文里显式说明为什么没画而不是假装漏掉了。
+  - docs/interview-qa.md —— 全部 19 轮的"面试追问"，逐字从
+    CLAUDECODEPROMPTS.md 原文核对抽取（不是凭记忆转述），12 轮有真实
+    问题列出清单+空复选框，7 轮（Round0/A0/A1/A4/A6/A12/B3）原始提示词
+    本来就没有面试追问段落，单独一节列出来说明，不是假装漏了或编几个
+    凑数。
+  - docs/delivery-checklist.md —— PLAN.md A12 结尾要求的交付检查表，
+    六个核心数字/交叉曲线/门禁拦截与回滚次数/决策记录条数/快评全评
+    归属/诚实清单逐项回答，每个数字都标了怎么复现（grep 命令、Python
+    一行程序），不是几句定性描述糊弄过去。
+  - Makefile 新增 `check-pollution`/`render-docs`/`demo` 三个目标。
+  - 单元测试 35 条（tests/unit/a12/：gateway app 9、incident_log 11、
+    render_docs 10、audit_pollution 3、demo 4）、元测试 4 条
+    （tests/meta/a12/，证明 pollution audit 能真的报红且不是永远红）、
+    烟测 2 条（tests/smoke/a12/：门禁 REJECT → incident-log 计数
+    全链路、render_docs+audit_pollution 对 run 发现结果的一致性——
+    子进程版的完整 `make demo` 流程改为人工跑通两次验证，不在 pytest
+    里重复跑，避免子进程/端口相关的偶发脆弱性）。`make verify-a12`
+    （走泛用 `verify-%`模式规则）+ 三个新增 Makefile 目标
+    （check-pollution/render-docs/demo）全部跑通；mypy --strict 对
+    92 个源文件干净；全项目 604 个测试全绿，无跨轮 regressions；
+    `check_no_cheating`/`check_placeholders` 均干净。
+
+遇到什么问题：
+  1. 写 A12 之前重新读了一遍已交付的 A9/A10 代码，发现"拦截记录
+    append-only 写 incident-log"这句话在两轮提示词里都出现过，但
+    `gate/admission.py`和`release/rollback.py`里都没有真正调用任何
+    文件写入——是两轮实现时都遗漏的真实缺口，不是这轮凭空加的新
+    需求。选择在 A12 补上而不是往回改 A9/A10 的 commit：A9/A10 的
+    核心决策逻辑本身没错（门禁判 REJECT、回滚触发都对），缺的只是
+    "写日志"这一步，用一个新模块 + 调用方显式调用来补，比回头改两个
+    已经交付、已经全测过的 round 侵入性更小。
+  2. 类似地发现 A6 的六个网关模块和 A7 的 `GatewayMetrics` 之间、以及
+    A6 六个模块彼此之间，都从未被证明能真正组合工作——每个模块的
+    单元测试都是孤立断言，没有一处端到端验证过"一个真实请求经过
+    全部六道关卡"。补 `gateway/app.py` 时顺带发现配额检查的真实语义
+    只能是生成后（不是 PLAN.md 字面暗示的生成前）——见 DD-0027，
+    没有为了凑字面意思去改两轮之前已交付的 `quota.py` 接口。
+  3. `gateway/app.py`的`completions`处理函数最初写成一个大函数，ruff
+    的 C901 圈复杂度检查报了 16（CLAUDE.md §9 要求 ≤10）——拆成
+    `_authenticate_and_rate_limit`/`_resolve_backend`/`_generate`/
+    `_enforce_quota` 四个独立函数后过检；拆分过程中发现一个真实
+    bug：外层 `except Exception` 会连 `_resolve_backend` 故意抛出的
+    `HTTPException`（路由到未配置模型时的 500）一起吞掉、错误地
+    重新包装成"upstream model call failed"——加了一条显式
+    `except HTTPException: raise` 直通分支修掉。
+  4. `make demo`第一次手动全流程跑完后检查是否有遗留进程
+    （`pgrep -f demo_stub_model_server.py`），确认子进程干净退出，
+    没有僵尸进程或端口占用残留，才认为这一步真正做完，不是"脚本
+    跑完没报错"就算数。
+  5. 提前建好的 `tests/smoke/a12/` 目录一直是空的（建目录时只是为了
+    跟其他轮次保持一致的三段式布局），第一次跑 `make verify-a12` 时
+    pytest 因为"没收集到任何用例"直接以退出码 5 失败——补上两条真实
+    的烟测（门禁 REJECT→incident-log 计数全链路、render_docs+
+    audit_pollution 对 run 发现结果的一致性）而不是删掉这个空目录
+    敷衍过去。
+
+怎么解决的：见上。
+
+测出什么数字：`docs/incident-log.md`里两条真实的门禁拦截记录（来自
+两次真实运行 `make demo`）；`docs/crossover-curve.md`/
+`docs/capacity-plan.md`里的并发数字（真实公式计算，估算输入，见
+DD-0028）。除此之外 A12 本身不产生新的性能/准确率数字——它是收尾轮，
+产出是文档、脚本、和补齐的两个真实缺口（incident-log 写入器、
+gateway 应用层组装），不是新的 benchmark 结果。
+```

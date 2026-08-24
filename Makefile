@@ -1,5 +1,5 @@
 .PHONY: help venv install lint typecheck test verify-% verify-a11-% smoke bench \
-        check-cheating check-placeholders night-queue clean
+        check-cheating check-placeholders check-pollution render-docs demo night-queue clean
 
 PYTHON ?= python3
 VENV ?= .venv
@@ -19,6 +19,9 @@ help:
 	@echo "  make verify-<id>        单轮验收，例如 make verify-a0"
 	@echo "  make check-cheating     AST 反作弊静态扫描"
 	@echo "  make check-placeholders 占位符扫描，必须为 0"
+	@echo "  make check-pollution    校验 artifacts/runs 下每个 run 的三个污染位"
+	@echo "  make render-docs        从 artifacts 重新生成 docs/ 下的数字页面"
+	@echo "  make demo               起服务→发请求→展示监控→触发门禁拦截→展示incident-log"
 	@echo "  make smoke PROFILE=x    烟测"
 	@echo "  make bench PROFILE=x    压测（需真实 GPU 环境，本沙箱会拒绝启动）"
 	@echo "  make night-queue        跑夜间任务队列"
@@ -49,6 +52,12 @@ check-cheating:
 
 check-placeholders:
 	$(PY) scripts/check_placeholders.py docs src
+
+check-pollution:
+	$(PY) scripts/audit_pollution.py
+
+render-docs:
+	$(PY) scripts/render_docs.py
 
 # make verify-a0, make verify-a1, ... make verify-b5
 # 约定：每轮的单元测试放 tests/unit/<id>/，元测试放 tests/meta/<id>/，
@@ -97,6 +106,9 @@ smoke:
 
 bench:
 	$(PY) -m modelhub.bench.cli --profile $(PROFILE)
+
+demo:
+	$(PY) scripts/demo.py
 
 night-queue:
 	$(PY) scripts/night_queue.py

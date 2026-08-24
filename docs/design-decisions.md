@@ -745,3 +745,111 @@
   TensorRT-LLM 加回来。
 - 实测数字：无（本沙箱无 GPU；这条排除本身是基于已核实的硬件/发行
   事实做出的范围决策，不是一次 benchmark 结果）。
+
+---
+
+## DD-0026 · incident-log 写入器：A9/A10 都说了要写，谁都没真正接线
+
+- 日期：2026-08-24 · Run: 无
+- 决策：新增 `release/incident_log.py`，作为独立模块补上 A9（"拦截
+  记录 append-only 写 docs/incident-log.md"）和 A10（灰度回滚事件同样
+  该记）都在原始提示词里写明、但两轮实现里都没有真正调用任何文件
+  写入的缺口。`gate/admission.py::run_admission_gate` 和
+  `release/rollback.py::trigger_rollback` 保持不变——不在这两个已经
+  交付、有完整测试覆盖的纯函数/薄副作用函数内部塞一个写死路径的 I/O
+  调用，而是让调用方（目前是 `scripts/demo.py`，未来会是一个真实的
+  服务编排层）在拿到 REJECT verdict 或触发回滚之后显式调用
+  `gate_rejection_incident`/`canary_rollback_incident` +
+  `append_incident`。
+- 考虑过：(a) 直接在 `run_admission_gate`/`trigger_rollback` 内部加
+  写文件的副作用；(b) 干脆不补，留到某个未来轮次。
+- 为什么不选 (a)：`run_admission_gate` 现在是纯函数（给定输入必然给定
+  输出，没有 I/O），这是它能被 A9 的元测试反复调用、快速跑五道闸组合
+  场景的前提；塞一个写死路径的文件 I/O 进去，会让每次调用门禁都产生
+  副作用，测试要么变慢（真实文件 I/O）要么被迫 mock（违反 CLAUDE.md
+  §1.4），两者都不如现在的形态。
+- 为什么不选 (b)：A12"收尾"这一轮的交付检查表明确要回答"门禁拦截与
+  灰度回滚各几次，是否每条都有根因"——如果这个问题的诚实答案是"没有
+  地方记录，所以不知道"，那就是这一轮该修的一个真实缺口，不是可以
+  合理留白的"未来工作"。
+- 什么情况会失效：如果未来出现一个真实的常驻服务进程（而不是每次
+  单独调用的 CLI/脚本），"谁调用 append_incident"这个问题需要挪到
+  那个服务的请求处理层，而不是继续靠 `scripts/demo.py` 这样的一次性
+  脚本触发。
+- 实测数字：`docs/incident-log.md` 里两条真实的 `GATE_REJECTION`
+  记录，来自两次真实运行 `make demo`（不是编的示例数据）——
+  `tests/unit/a12/test_incident_log.py`（11 个用例）+
+  `tests/meta/a12/`（间接覆盖，见 DD-0028）验证了写入/追加/计数的
+  正确性。
+
+---
+
+## DD-0027 · gateway/app.py：A6 的六个模块从未被证明能真正组合到一起
+
+- 日期：2026-08-24 · Run: 无
+- 决策：新增 `gateway/app.py`，一个真实的 FastAPI 应用，把 A6 写的
+  auth/rate_limit/quota/circuit_breaker/routing/billing 六个模块按
+  "鉴权 → 限流 → 路由 → 熔断 → 调用模型 → 配额 → 计费"的顺序真正串起来
+  （模块文档字符串里写明白了每一步为什么是这个顺序），并在这一轮里
+  额外接上 A7 的 `GatewayMetrics`（A6 和 A7 之间同样从来没有真正接过
+  线）。
+- 考虑过：不补这个文件，`make demo`的"起服务"步骤改成对六个模块分别
+  调用、不真正过一遍 HTTP 请求生命周期。
+- 为什么不这么做：A6 round 交付的六个模块各自有完整单元测试，但没有
+  任何一处代码证明"这六个东西按顺序拼起来会正常工作"——每个模块的
+  测试都是孤立喂输入、断言输出，从没验证过一个真实请求经过全部六道
+  关卡后的端到端行为（比如：熔断器 OPEN 时是否真的不再调用模型、
+  配额超限时是否真的丢弃已经算好的补全结果）。A12 是"收尾"轮，"收尾"
+  的本意之一就是应该在这时候发现并修这类"零件都测过、没人测过总装"
+  的缺口，而不是留着。
+- ★ 配额检查在生成之后而不是之前：`quota.py` 现有的唯一入口
+  `enforce_quota` 需要"这次请求用了多少 token"才能判断是否超额，而
+  这个数字生成之前不存在——所以真实语义上，配额只能是"生成完之后
+  发现超额，丢弃这次响应、返回 429"，不是"生成前挡下来"。PLAN.md
+  原话"超额 429"字面上更像是前置检查，但按 A6 已经交付、已经测试
+  覆盖的 `quota.py` 接口形状，post-hoc 检查是唯一诚实的实现——没有
+  为了凑字面意思去改一个已经交付两轮之前、有自己测试套件的模块。
+  真正的前置检查（先读当前用量，生成前就挡）需要 `quota.py` 新增一个
+  只读接口，留作已知局限记在 `docs/delivery-checklist.md`，不是这一轮
+  顺手改掉。
+- 什么情况会失效：如果未来真的要把"生成前挡超额请求"作为硬要求（比如
+  避免为已经确定会被拒绝的租户浪费 GPU 算力），需要回到 `quota.py`
+  加一个 `check_quota_status`（只读、不计数）作为独立的前置检查，
+  `enforce_quota` 的后置计数职责保持不变。
+- 实测数字：`tests/unit/a12/test_gateway_app.py` 9 个用例，通过真实
+  Starlette `TestClient` + 真实本地 Redis（`tests.conftest.
+  requires_redis`）覆盖鉴权失败/限流超限/熔断打开/配额超限/计费金额/
+  `/metrics` 端点六条路径全部真实触发过一次，不是只测了"构造函数不
+  报错"。
+
+---
+
+## DD-0028 · render_docs.py：两类"真实"分开标注，不混在一起
+
+- 日期：2026-08-24 · Run: 无
+- 决策：`scripts/render_docs.py` 生成的三个页面分两类标注："PLANNING
+  ESTIMATE"（`capacity-plan.md`/`crossover-curve.md`——公式代码真实，
+  输入是文档里承认的估算值）和"PENDING"（`metrics-summary.md` 里六个
+  核心数字中的五个——既没有真实公式输入也没有真实 run 可以读）。两类
+  都不是"真实测量值"，但原因不同，所以标注也不同——不能笼统写一句
+  "估算，仅供参考"就把两种不同程度的不确定性混为一谈。
+- 考虑过：只生成一份"全部标 PENDING"的报告，等真机跑出数字再一次性
+  替换；或者反过来，把 capacity-plan/crossover-curve 也算作"待测"，
+  和其余四个数字用同一个占位符。
+- 为什么不这么做：容量规划和交叉曲线用的公式（A8 的
+  `estimate_max_concurrent_requests`/`find_concurrency_crossover_
+  point`）本身没有变，变的只是喂给它的 `weight_bytes`/
+  `gdn_fixed_state_bytes` 是不是真实测量值——这是两个独立的不确定性
+  来源，压缩成一句"都没测"会丢掉"公式已经用真实架构参数验证过、
+  只差实测输入"这个更细粒度、对读者更有用的信息（尤其是这两个数字
+  算出的 2000-token 交叉点，与 MODEL-SELECTION-FINAL.md 文档记载的
+  1k–3k 区间吻合，这本身是"公式没写错"的一个真实证据，值得单独说）。
+- 什么情况会失效：一旦有真实的 vLLM 启动日志解析出真实
+  `weight_bytes`/`gdn_fixed_state_bytes`，"PLANNING ESTIMATE"标签就该
+  换成真实数字 + `measured` 来源标注，`render_docs.py`不需要改代码，
+  只需要真实 profile yaml 文件更新。
+- 实测数字：`docs/crossover-curve.md`（本轮生成）—— Arctic-7B 在
+  1000 tokens 时 175 并发、Qwen3.5-9B 103@2000/交叉点在 2000 tokens；
+  `tests/unit/a12/test_render_docs.py` 10 个用例验证了污染 run 会被
+  正确排除、零 run 时六个核心数字里五个正确渲染成 PENDING、页面标注
+  文案存在。
