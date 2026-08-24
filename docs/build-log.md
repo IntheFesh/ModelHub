@@ -487,3 +487,61 @@ A7（同一 session）
 在这里只能验证"真实测不出时诚实返回 None"这一条路径；真实 TFLOPS/
 带宽数字要等真机验证（DD-0003）。
 ```
+
+```
+A8（同一 session）
+做了什么：
+  - bench/gpu_guard.py —— `check_gpu_exclusivity`/`guard_gpu_exclusivity`，
+    真实 `nvidia-smi --query-compute-apps` 进程数检测（CLAUDE.md §5.2
+    "压测机独占"）。本沙箱没有 nvidia-smi，测的是真实 SKIP 路径；
+    `guard_gpu_exclusivity` 对 SKIP/FAIL 一视同仁拒绝启动（白名单原则：
+    "测不了"不等于"干净"）。
+  - bench/load_test.py —— `run_load_test`，`ThreadPoolExecutor` 并发
+    压测一个 `ModelClient`（复用 A4 的 Protocol，不重新定义接口），
+    最近邻百分位（P50/P95/P99）纯 Python 实现，失败请求按异常类型分类
+    计数（`error_breakdown`），不静默吞掉。
+  - bench/capacity_planning.py —— `estimate_max_concurrent_requests`/
+    `find_concurrency_crossover_point`，A5/DD-0014 里明确留给 A8 的
+    容量规划公式。**过程中发现并修复一个真实的公式语义 bug**——GDN
+    固定态开销该算"每并发请求"还是"全卡一次性"，只有前者能复现
+    MODEL-SELECTION-FINAL.md 写的"1k–3k 之间交叉"结论（DD-0018，
+    全过程详细记录）。
+  - bench/cost_model.py —— `cost_per_million_tokens_usd`/
+    `estimate_request_cost_usd`，GPU 每小时租金 ÷ 实测 tok/s 反推
+    $/请求，`gpu_hourly_cost_usd` 强制显式传参、代码里没有任何默认值——
+    FACTS.md 只公开过训练用 2×A100 的租金区间，没有本项目实际用的
+    RTX 5090 推理卡的确认租金，不能凭空补一个"看起来合理"的数字。
+  - bench/sweep.py —— `run_sweep`，二维 sweep（并发 × prompt 长度）
+    编排，启动前强制走 `guard_gpu_exclusivity`（`skip_gpu_guard` 仅供
+    测试用，绝不能在真实压测里打开）。
+  - `configs/bench/capacity_planning.yaml` —— GPU 显存/利用率/运行时
+    开销直接照抄 FACTS.md 自己写的公式（32GiB × 0.92 − 2.5GiB），
+    不是另编一套数字。`configs/bench/sweep_grid.yaml` 是压测网格设计
+    参数（不是测量值）。
+  - 单元测试 33 条（tests/unit/a8/）、元测试 4 条（tests/meta/a8/，
+    其中一条把 DD-0018 发现的错误公式原样留作对照实现，另一条证明
+    GPU 独占门禁真的能挡住一次端到端的压测启动）、烟测 1 条。
+    `make verify-a8` 38 个用例全绿。
+
+遇到什么问题：
+  1. **本轮最重要的发现**：见 DD-0018——GDN 固定态开销的语义 bug。
+     这不是"写测试时顺手改了改代码让测试过"，而是先写出一个明确、
+     独立于代码实现的验证目标（"真实配置应该复现文档写的交叉行为"），
+     拿这个目标去检验代码，代码没通过，回头去查为什么、找到真实原因
+     （循环状态是逐请求的，不是逐卡的）、修正语义、重新验证——这正是
+     CLAUDE.md 反复强调的"先写会真的变红的检查，再让实现去满足它"，
+     不是反过来拿实现结果去调检查的阈值。
+  2. `bench/cost_model.py` 差点想给 `gpu_hourly_cost_usd` 一个"看起来
+     合理"的默认值（比如照抄训练那台 2×A100 算出来的单卡时租金），
+     写文档字符串时意识到这是在编数字——FACTS.md 明确只对训练 GPU
+     报过区间，没有针对实际使用的 RTX 5090 推理卡的确认价格，
+     两种卡的市场行情不能互相替代。改成强制必填参数，不留任何隐式
+     兜底。
+
+怎么解决的：见上。
+
+测出什么数字：无。A8 本身不产生真实压测数字（本沙箱无 GPU，无法真的
+起 vLLM 服务测 QPS/P99）；容量规划的"交叉点在 1k–3k 之间"是复现文档
+既有结论的正确性验证，不是新测出的数字；成本模型的函数本身没有任何
+硬编码价格，等真实压测拿到 tok/s 之后才能算出真实数字。
+```

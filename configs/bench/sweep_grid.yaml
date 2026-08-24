@@ -1,0 +1,13 @@
+# bench/sweep.py::SweepGridConfig — the 2D sweep grid PLAN.md calls for
+# ("并发 × prompt 长度，独占"). concurrency_levels and
+# prompt_length_labels are the experiment design, not measured values;
+# num_requests_per_cell is small on purpose for a smoke-scale run — a
+# real bench run should raise it once actually pointed at a served
+# model.
+
+concurrency_levels: [1, 2, 4, 8, 16, 32]
+prompt_length_labels: ["1k", "3k", "8k", "16k"]
+num_requests_per_cell: 20
+max_tokens: 256
+temperature: 0.0
+generate_timeout_s: 60.0

@@ -1,0 +1,13 @@
+# bench/capacity_planning.py::CapacityPlanningConfig
+#
+# gpu_memory_bytes/gpu_memory_utilization/runtime_overhead_bytes are
+# FACTS.md's own documented formula for a single RTX 5090
+# ("可用 KV 预算 = 32GB × 0.92 − 权重 − 2.5GB(运行时+激活)"), not invented
+# defaults — 32 GiB card, 92% utilization ceiling, 2.5 GiB reserved for
+# runtime/activations. max_new_tokens is a planning assumption (typical
+# BIRD/Spider SQL output length), not a measured value.
+
+gpu_memory_bytes: 34359738368     # 32 GiB
+gpu_memory_utilization: 0.92
+runtime_overhead_bytes: 2684354560  # 2.5 GiB
+max_new_tokens: 256

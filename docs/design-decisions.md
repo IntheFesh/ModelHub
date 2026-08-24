@@ -510,3 +510,43 @@
 - 实测数字：无。`tests/meta/a7/test_unmeasured_hardware_never_fabricates_a_manifest_value.py`
   证明本沙箱真实测不出峰值时（`torch` 确实没装），这两个测量函数的
   `None` 结果会原样传进 `RunManifest`，不会被替换成任何数字。
+
+---
+
+## DD-0018 · GDN 固定态是"每并发请求"成本，不是"全卡一次性"成本——一个真实算错的 bug
+
+- 日期：2026-08-24 · Run: 无（A8 不产生真实压测数字）
+- 决策：`bench/capacity_planning.py::estimate_max_concurrent_requests`
+  把 `ModelProfile.gdn_fixed_state_bytes` 计入**每个并发请求**的显存开销
+  （`per_request_bytes = kv_bytes_per_token × (prompt+max_new) +
+  gdn_fixed_state_bytes`），而不是从整卡的共享可用预算里只扣一次。
+- 考虑过：最初的实现（写 A8 第一版时）把它当成"全卡只有一份"从
+  `usable_bytes` 里扣一次——这是 A5 写 `gdn_fixed_state_bytes` 字段时
+  文档措辞"per-layer fixed-size recurrent state, independent of
+  sequence length"埋下的歧义："跟序列长度无关"没错，但没说清楚
+  "跟并发请求数有没有关"，实现时想当然按"全局一份"处理了。
+- 怎么发现的：给 `find_concurrency_crossover_point` 写单元测试时，
+  想用真实的 Arctic-7B / Qwen3.5-9B 配置文件复现
+  MODEL-SELECTION-FINAL.md 明确写的"曲线在 1k–3k 之间交叉"这个结论——
+  结果按"全局扣一次"的公式算出来，Qwen3.5-9B 在**任何** prompt 长度下
+  并发数都比 Arctic-7B 高，根本不存在交叉点，跟文档正面矛盾。
+  GDN 的循环状态（recurrent state）本质上和 KV cache 一样是**每个在途
+  生成序列各自一份**——两个并发请求各自需要一份独立的状态矩阵，
+  不是整张卡共享一份。把这个开销从"每张卡扣一次"改成"每个并发请求都要
+  掏"之后，用真实配置文件重算：Arctic 在 1k token 时并发数反超 Qwen3.5
+  （214 vs 183），到 3k 时被反超（71 vs 80）——跟文档"1k–3k 之间交叉"
+  的说法几乎精确吻合。
+- 为什么这是可信的修复而不是"调参数凑答案"：改动前后用的都是同一份
+  真实 YAML 配置（`configs/serve/model_profiles/*.yaml`，A5 就已经
+  写死、这一轮没有改动任何数值），改的只是"这个字节数该被谁承担"这一
+  处代码逻辑；改完之后不仅方向对了，连"1k-3k 之间"这个区间都对上了，
+  这是模型语义修对了带来的自然结果，不是为了让测试变绿反向调整了
+  测试数据（`tests/meta/a8/test_gdn_per_request_cost_matches_documented_crossover.py`
+  把错误公式原样保留在测试文件里做对照，任何人都能重新验证这个结论）。
+- 什么情况会失效：如果真实 vLLM/GDN 实现里循环状态其实是可以跨请求
+  共享的（比如某种 batched 状态复用优化），这个"每请求一份"的假设
+  就需要重新核实——目前没有证据支持"可共享"这个更乐观的假设，
+  按更保守（每请求一份）的假设做容量规划更安全。
+- 实测数字：无。`tests/unit/a8/test_capacity_planning.py::
+  test_real_arctic_vs_qwen_profiles_reproduce_the_documented_crossover`
+  和上面提到的元测试都是可执行验证，不是叙述。
