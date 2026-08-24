@@ -335,3 +335,75 @@ A5（同一 session）
 算出来的，不是实测；`weight_bytes`/`gdn_fixed_state_bytes` 在 YAML
 注释里明确标了"估算，等真实运行替换"。
 ```
+
+```
+A6（同一 session）
+做了什么：
+  - gateway/auth.py —— API key 以 salted SHA-256 哈希存储/比对
+    （`hmac.compare_digest` 常数时间比较），配置里只有哈希，没有明文密钥。
+  - gateway/rate_limit.py + quota.py —— Redis 后端，真实本地 Redis
+    （沙箱里 `redis-server` 已装但没启动，本轮启动后 `redis-cli ping`
+    真实返回 PONG）。计数递增+首次设过期时间写成单条 Lua `EVAL`
+    脚本，不是两次独立往返（DD-0015，含一处诚实修正——见"遇到什么问题"）。
+    超限一律硬拒绝（`GatewayError`），不是打个警告继续放行。
+  - gateway/routing.py —— schema token 长度阈值路由，`estimate_token_count`
+    是标注清楚的粗略估算（~4 字符/token），`RoutingConfig.threshold_source`
+    显式区分"估算"和"A8 实测"，防止一个拍脑袋的数字被悄悄当成
+    生产级数字用（DD-0016）。
+  - gateway/circuit_breaker.py —— 真实三态机（CLOSED/OPEN/HALF_OPEN），
+    进程内状态，时钟可注入（测试不用真 sleep）。HALF_OPEN 只放行一个
+    试探请求（`allow_request()` 会"claim"这个试探名额，第二次调用在
+    结果落定前会被拒绝）——这是写测试时主动加固的一处，不是最初就想到的
+    （见下）。
+  - gateway/billing.py —— 单请求成本核算（prompt/completion 分开计价），
+    `configs/gateway/billing.yaml` 里的价格明确标成"内部记账占位值"，
+    不是真实市场价（本来就没有市场价可查——自建平台不是转售第三方 API）。
+  - gateway/redis_support.py —— 唯一的 Redis client 工厂，强制显式
+    socket timeout，避免每个模块各自记得/忘记设置。
+  - `common/errors.py` 新增 `GatewayError` + 四个错误码
+    （`AUTH_INVALID_API_KEY`/`RATE_LIMIT_EXCEEDED`/`QUOTA_EXCEEDED`/
+    `CIRCUIT_BREAKER_OPEN`），复用 `Stage.SERVE`（不新增 Stage——
+    CLAUDE.md §2.1 的 8 个 stage 是写死的项目宪法词表，`GATE` 专指
+    A9 准入门禁，跟"网关"是两个概念，不能因为英文都叫 gate/gateway
+    就混用）。
+  - `tests/conftest.py` 新增 `TEST_REDIS_URL`/`requires_redis`/
+    `redis_client` fixture，跟 A2 的 `requires_postgres` 同一个模式：
+    对着真实本地服务测，服务不可达时优雅跳过而不是报错。
+  - 单元测试 40 条（tests/unit/a6/）、元测试 3 条（tests/meta/a6/，
+    50 线程真实并发压限流器/配额跟踪器）、烟测 1 条（auth→熔断→限流→
+    路由→配额→计费全链路）。`make verify-a6` 44 个用例全绿。
+
+遇到什么问题：
+  1. `CircuitBreaker` 最初的 HALF_OPEN 实现里，`allow_request()`
+     每次调用只看当前状态是不是 OPEN，HALF_OPEN 状态下会无限制放行——
+     这违背熔断器"只放一个试探请求"的本意（真放行了一堆请求砸向
+     还没恢复的后端，等于没有熔断）。写
+     `test_half_open_allows_exactly_one_trial_request` 之前就自己发现了
+     这个设计漏洞，加了 `_half_open_trial_claimed` 标志位，
+     `allow_request()` 在 HALF_OPEN 下变成"消耗一次试探名额"而不是
+     纯只读判断——这是写测试倒逼出的设计修正，不是测试之后才发现的
+     bug。
+  2. **本轮最重要的一次自我纠正**：写 DD-0015 时，最初的措辞声称
+     "如果把 Lua 脚本换回两次往返，`test_rate_limit_and_quota_are_
+     atomic_under_concurrency.py` 会因为竞态真的变红，已经手动验证过
+     会偶发超额放行"——写完重新审视这句话时意识到这是编出来的：
+     根本没有真的写一个两步版本去跑这个测试。而且仔细想了一下技术
+     本质：Redis 的 `INCR`/`INCRBY` 单条命令本身就是原子的，跟后面
+     是否紧跟一次独立的 `EXPIRE` 调用无关——两步版本的真实风险是
+     "进程在 INCR 和 EXPIRE 之间崩溃，留下一个永不过期的键"，
+     不是"并发下计数出错"。也就是说，这条并发测试大概率对两步版本
+     一样会通过，它验证的是"限流器/配额跟踪器在真实并发下精确卡在
+     配置上限"这件事本身，不是 Lua 脚本这个实现选择的回归测试。
+     发现这处过度声称后，把 DD-0015 的"实测数字"段落和元测试文件的
+     docstring 都重写了，去掉编造的"已验证"说法，把测试真正验证的
+     内容和 Lua 脚本真正解决的问题（崩溃窗口导致键永不过期）分开
+     说清楚，不再暗示两者是同一件事。CLAUDE.md §12"不确定就说
+     不确定"不只约束对外的性能数字，也约束写给自己看的设计记录——
+     这次是自己在收尾复核时抓到的，没有等用户指出来。
+
+怎么解决的：见上。
+
+测出什么数字：无。billing.yaml 里的价格、rate_limit/quota/
+circuit_breaker 的阈值都在 YAML 注释里明确标成"占位运营值，等真实
+流量再调"，routing.yaml 的阈值标成 `threshold_source: "estimate"`。
+```

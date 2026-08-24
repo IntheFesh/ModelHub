@@ -1,0 +1,7 @@
+# Daily per-tenant token quota by tier. Placeholder operational values —
+# not derived from any measured number, tune against real traffic once
+# this gateway actually serves requests.
+daily_token_quota_by_tier:
+  free: 100000
+  standard: 1000000
+  premium: 10000000

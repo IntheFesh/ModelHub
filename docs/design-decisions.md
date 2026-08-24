@@ -409,3 +409,74 @@
 - 实测数字：无。`tests/unit/a5/test_vllm_log_parser.py` 里的日志片段是
   手写的、按已知 vLLM 日志格式构造的，不是真实 run 的产物，
   docstring 里写明了这一点。
+
+---
+
+## DD-0015 · gateway/ 的限流与配额用真实 Redis + 原子 Lua 脚本，不是"先 GET 后 SET"
+
+- 日期：2026-08-24 · Run: 无（A6 不产生性能数字）
+- 决策：`rate_limit.py`/`quota.py` 的计数器递增 + 首次设置过期时间，
+  写成单条 `EVAL` 原子脚本（`INCR`/`INCRBY` 之后判断是否要设 `EXPIRE`），
+  不是两次独立的 Redis 往返。本沙箱装了真实 Redis（`redis-server` 已经
+  在系统里，只是没启动——启动后 `redis-cli ping` 真实返回 `PONG`），
+  所以测试对着真实 Redis 跑，不是拿 Python dict 假装一个 Redis。
+- 考虑过：(a) `INCR` 后单独一次 `EXPIRE` 调用（更直观，两行代码）；
+  (b) 用 `redis-py` 的 `pipeline(transaction=True)`（MULTI/EXEC）代替
+  Lua 脚本。
+- 为什么选 Lua 脚本而不是 (a)：两次独立往返之间存在真实的竞态——
+  如果进程在 `INCR` 和 `EXPIRE` 之间崩溃，或者两个并发请求交错执行，
+  会留下一个永远不过期的计数器键（配额/限流的失效模式是"多算了一点点"
+  还是"这个租户从此再也限不住"，后者是本项目不能接受的）。
+  为什么选 Lua 脚本而不是 (b)：MULTI/EXEC 保证的是"这批命令按顺序、
+  不被其他客户端命令插入执行"，但它本身不支持"读取 INCR 的返回值来
+  决定要不要执行 EXPIRE"这种条件逻辑（pipeline 里的命令是无条件打包
+  发送的，看不到前一条命令在服务端的执行结果）——真要用 MULTI/EXEC
+  实现"仅在计数器刚创建时才设置 TTL"，需要 WATCH/重试循环，比一条
+  Lua 脚本更复杂且不天然更安全。Lua 脚本在 Redis 服务端单线程执行，
+  是这个需求最简单也最正确的写法。
+- 什么情况会失效：如果未来切到 Redis Cluster 且限流键分布在不同分片，
+  单条 Lua 脚本仍然安全（脚本只碰一个 key，符合 cluster 的单 slot
+  限制），但如果哪天需要跨多个 tenant key 做一次原子操作，这个模式
+  就不再直接适用，需要重新设计。
+- 实测数字：无。`tests/meta/a6/test_rate_limit_and_quota_are_atomic_under_concurrency.py`
+  用真实 50 线程并发对同一个 key 压 `check_rate_limit`/
+  `record_and_check_quota`，断言放行数量精确等于配置的上限——这条测试
+  验证的是"限流器/配额跟踪器在真实并发下确实精确卡在配置的上限"这件事
+  本身（一个值得单独用真实并发验证、而不是只靠读代码相信的正确性
+  性质），**不是** Lua 脚本这个实现选择本身的回归测试：Redis 的
+  `INCR`/`INCRBY` 单条命令天然原子，即便写成"先 INCR 再单独一次
+  EXPIRE"两次往返，计数本身大概率也不会在并发下失准——没有实际写
+  两步版本去验证过，不应该、也没有声称这条测试会因为那个改动而变红。
+  Lua 脚本真正解决的是 §"为什么选"里写的那个问题：进程在 INCR 和
+  EXPIRE 之间崩溃/被杀，会留下一个永不过期的计数器键——这是一个
+  时序窗口很窄、用普通测试基本测不出来的故障模式，本条目诚实地
+  承认它没有可执行验证，只有推理依据。
+
+---
+
+## DD-0016 · gateway 的路由阈值故意留 estimate，不在这一轮编一个"测出来"的数字
+
+- 日期：2026-08-24 · Run: 无
+- 决策：`configs/gateway/routing.yaml` 的 `schema_token_threshold: 1500`
+  配一个 `threshold_source: "estimate"` 字段，明确标注这不是 A8 压测出的
+  真实交叉点，只是 FACTS.md 文档里"1k–3k 之间交叉"这个区间的一个居中
+  取值。`RoutingConfig` 的 schema 把这个字段设成必填（不是默认值+可选），
+  逼着任何写这份 YAML 或读这份 YAML 的人都要显式面对"这个数字的来源
+  是什么"这个问题。
+- 考虑过：直接编一个"看起来更精确"的数字（比如 1847）让它显得像是
+  测出来的。
+- 为什么不这么做：CLAUDE.md §3.2"文档禁止手写数字"和 §12"不确定就说
+  不确定"两条原则合在一起，禁止的不只是"编一个假数字"，也包括"用一个
+  精度虚高的数字暗示它是测出来的"——1500 这种整百数字反而更诚实地
+  传达"这是拍出来的中间值，不是测量结果"。等 A8 真的跑完 prompt 长度
+  扫描、找到真实交叉点，`threshold_source` 改成 `"measured"`，
+  数值本身也替换掉，两个改动一起发生，不会出现"数值已经很精确但
+  source 字段忘了改"的不一致状态（因为两者本来就该在同一次改动里完成）。
+- 什么情况会失效：如果 A8 的压测发现交叉点其实在 1k 以下或 8k 以上
+  （比 FACTS.md 估计的范围偏差很大），说明前面对 KV 经济学的估算本身
+  有问题，需要回头核对 `serve/model_profile.py` 的层数/KV头/head_dim
+  配置，而不是简单地把这个数字覆盖掉了事。
+- 实测数字：无。`tests/unit/a6/test_routing.py::
+  test_real_routing_config_loads_and_is_labeled_an_estimate` 断言
+  真实提交的配置文件里 `threshold_source == "estimate"`，防止有人
+  以后不小心把这个字段悄悄改成 `"measured"` 却没有真的跑 A8。

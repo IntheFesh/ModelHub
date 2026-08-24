@@ -1,0 +1,13 @@
+# Internal chargeback rates for gateway/billing.py's per-request cost
+# accounting. These are ILLUSTRATIVE placeholder numbers for a
+# self-hosted platform (there is no market price to look up — this is
+# not a paid third-party API), not a verified cost model. A8's actual
+# cost model (real measured $/1M-tokens from GPU-hour amortization) is
+# the source of truth once it exists; these placeholders exist only so
+# billing.py's arithmetic has something real to run tests against.
+price_per_1k_prompt_tokens_usd:
+  arctic-text2sql-r1-7b: 0.0002
+  qwen3.5-9b: 0.00025
+price_per_1k_completion_tokens_usd:
+  arctic-text2sql-r1-7b: 0.0006
+  qwen3.5-9b: 0.00075

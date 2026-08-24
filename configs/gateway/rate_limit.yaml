@@ -1,0 +1,5 @@
+# Fixed-window per-principal rate limit. Placeholder operational values —
+# not derived from any measured number, tune against real traffic once
+# this gateway actually serves requests.
+requests_per_window: 60
+window_seconds: 60

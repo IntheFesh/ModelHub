@@ -78,3 +78,45 @@ def _postgres_reachable() -> bool:
 requires_postgres = pytest.mark.skipif(
     not _postgres_reachable(), reason="local PostgreSQL test server not reachable"
 )
+
+
+# ── shared fixtures for tests/{unit,meta}/a6 (gateway/: rate limiting and
+# quota tracking are genuinely Redis-backed, not an in-memory stand-in —
+# same "use the real service, not a mock" precedent as Postgres above)
+# ──────────────────────────────────────────────────────────────────────
+
+TEST_REDIS_URL = "redis://127.0.0.1:6379/15"  # db 15: kept clear of any real use
+
+
+def _redis_reachable() -> bool:
+    try:
+        import redis
+
+        client = redis.Redis.from_url(TEST_REDIS_URL, socket_connect_timeout=2, socket_timeout=2)
+        try:
+            return bool(client.ping())
+        finally:
+            client.close()
+    except Exception:
+        return False
+
+
+requires_redis = pytest.mark.skipif(
+    not _redis_reachable(), reason="local Redis test server not reachable"
+)
+
+
+@pytest.fixture
+def redis_client() -> object:
+    """A real Redis client against a dedicated test DB, flushed before and
+    after each test so gateway/ rate-limit and quota tests never see
+    another test's leftover keys."""
+    import redis
+
+    client = redis.Redis.from_url(TEST_REDIS_URL, socket_connect_timeout=2, socket_timeout=2)
+    client.flushdb()
+    try:
+        yield client
+    finally:
+        client.flushdb()
+        client.close()

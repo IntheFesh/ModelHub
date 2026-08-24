@@ -84,6 +84,15 @@ class ErrorCode(StrEnum):
     # complete while quietly missing data. --
     REPORT_REQUIRED_FIELD_MISSING = "REPORT_REQUIRED_FIELD_MISSING"
 
+    # -- gateway: A6 (Stage.SERVE — the gateway sits in front of the model
+    # server, distinct from Stage.GATE's admission-gate meaning). Each of
+    # these is a request being explicitly *refused*, never silently
+    # allowed through or silently downgraded. --
+    AUTH_INVALID_API_KEY = "AUTH_INVALID_API_KEY"
+    RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED"
+    QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
+    CIRCUIT_BREAKER_OPEN = "CIRCUIT_BREAKER_OPEN"
+
 
 # CLAUDE.md §2.3: the SQL exec six/seven-way split collapses to two buckets
 # that matter for GRPO reward masking and eval-report gating: is this the
@@ -160,3 +169,10 @@ class ManifestError(ModelHubError):
 
 class ReportError(ModelHubError):
     """Raised by eval.report on missing required fields or polluted runs."""
+
+
+class GatewayError(ModelHubError):
+    """Raised by gateway/ on a refused request: bad auth, rate limit,
+    quota exhaustion, or an open circuit breaker. Every raise site fills
+    in `retryable` deliberately — a rate limit is retryable after backoff,
+    an invalid API key is not."""

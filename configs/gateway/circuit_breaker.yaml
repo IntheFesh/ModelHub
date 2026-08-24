@@ -1,0 +1,6 @@
+# Per-backend circuit breaker thresholds. Placeholder operational values —
+# not derived from any measured number, tune against real traffic once
+# this gateway actually serves requests.
+failure_threshold: 5
+failure_window_seconds: 30.0
+cooldown_seconds: 15.0

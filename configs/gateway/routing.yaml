@@ -1,0 +1,16 @@
+# Schema-token-length routing threshold between the platform's two
+# serving models (MODEL-SELECTION-FINAL.md's A6 amendment).
+#
+# schema_token_threshold is currently an ESTIMATE seeded from FACTS.md's
+# documented 1k-3k crossover range (Arctic-7B vs Qwen3.5-9B concurrency
+# curves cross somewhere in there) — it is NOT yet A8's real measured
+# crossing point. `threshold_source` stays "estimate" until A8's
+# prompt-length bench sweep backfills the real value here
+# (PLAN.md: "路由阈值回填 configs/gateway/"). Downstream code (A9's gate,
+# any report) should treat threshold_source == "estimate" as "this
+# routing decision is provisional," not production-final.
+
+schema_token_threshold: 1500
+threshold_source: "estimate"
+short_schema_model_id: "arctic-text2sql-r1-7b"
+long_schema_model_id: "qwen3.5-9b"
