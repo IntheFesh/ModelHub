@@ -1,0 +1,33 @@
+# train/experiments/kernel_optimization_comparison.py::
+# KernelOptimizationExperimentConfig
+#
+# Groups 5-6: Liger Kernel on/off, Flash Attention on/off, sequence
+# packing on/off — 200 steps per side (PLAN.md). Held against the same
+# LoRA r=32 baseline as group 1 (lora_rank/lora_target_modules identical
+# to peft_method_comparison.yaml) — PLAN.md's "严格控制变量": these
+# three toggles are about the kernel/data-loading path, not the
+# fine-tuning method.
+# gpu_cost_per_hour is NOT a field here — see
+# peft_method_comparison.yaml's comment / docs/design-decisions.md.
+
+model_name_or_path: "Qwen/Qwen3.5-9B"
+dataset_name: "bird23_train_filtered_spider_train"
+template: "qwen"
+cutoff_len: 4096
+seed: 42
+num_steps: 200
+micro_batch_size: 4
+lora_rank: 32
+lora_target_modules:
+  - gate_proj
+  - up_proj
+  - down_proj
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - in_proj_qkvz
+  - in_proj_ba
+  - out_proj
+  - conv1d
+output_root: "artifacts/train/experiments/kernel_optimization"

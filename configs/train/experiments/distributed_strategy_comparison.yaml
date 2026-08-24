@@ -1,0 +1,23 @@
+# train/experiments/distributed_strategy_comparison.py::
+# DistributedStrategyExperimentConfig
+#
+# Group 4: ZeRO-2 vs ZeRO-3 vs FSDP, dual-card, 200 steps each
+# (PLAN.md). finetuning_type is fixed to "full" inside the renderer
+# (sharding strategy matters most for full-parameter training — same
+# reasoning as group 3's full+ZeRO-3).
+# model_name_or_path/dataset_name/template/cutoff_len kept identical to
+# configs/train/sft_qwen3_5_9b.yaml and peft_method_comparison.yaml —
+# only the axis under comparison (distributed strategy) should vary.
+# gpu_count=2 is PLAN.md's own literal "双卡".
+# gpu_cost_per_hour is NOT a field here — see
+# peft_method_comparison.yaml's comment / docs/design-decisions.md.
+
+model_name_or_path: "Qwen/Qwen3.5-9B"
+dataset_name: "bird23_train_filtered_spider_train"
+template: "qwen"
+cutoff_len: 4096
+seed: 42
+num_steps: 200
+micro_batch_size: 4
+gpu_count: 2
+output_root: "artifacts/train/experiments/distributed_strategy"

@@ -1,0 +1,43 @@
+# train/experiments/peft_method_comparison.py::PeftMethodExperimentConfig
+#
+# Groups 1-3: LoRA (r=32) / QLoRA (4bit bnb) / full+ZeRO-3.
+# model_name_or_path/dataset_name/template/cutoff_len/lora_rank/
+# lora_target_modules kept identical to configs/train/sft_qwen3_5_9b.yaml
+# — B2's whole point is holding everything but the compared axis
+# constant (PLAN.md: "严格控制变量...manifest可核对").
+# lora_num_steps=300 / full_num_steps=200 / qlora_bits=4 are PLAN.md's
+# own literal numbers, not tuned.
+# micro_batch_size/gradient_accumulation_steps are operational defaults
+# for a short comparison run, not measured.
+# gpu_cost_per_hour is deliberately NOT a field here — same discipline
+# as src/modelhub/bench/cost_model.py: FACTS.md's only 2xA100-80G rental
+# figure is an unconfirmed, market-fluctuating range ("行情波动，以实际
+# 报价为准"), not a settled number to bake into a checked-in config.
+# run_peft_method_comparison_group() takes it as a required call-site
+# argument instead — see docs/design-decisions.md.
+
+model_name_or_path: "Qwen/Qwen3.5-9B"
+dataset_name: "bird23_train_filtered_spider_train"
+template: "qwen"
+cutoff_len: 4096
+seed: 42
+lora_rank: 32
+lora_target_modules:
+  - gate_proj
+  - up_proj
+  - down_proj
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - in_proj_qkvz
+  - in_proj_ba
+  - out_proj
+  - conv1d
+qlora_bits: 4
+zero3_config_relpath: "artifacts/train/experiments/peft_method/ds_zero3.json"
+lora_num_steps: 300
+full_num_steps: 200
+micro_batch_size: 4
+gradient_accumulation_steps: 4
+output_root: "artifacts/train/experiments/peft_method"

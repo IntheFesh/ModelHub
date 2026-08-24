@@ -1081,3 +1081,126 @@ B-track（训练）第一轮
     `state`/`control` 对象验证签名和行为，真实 HF Trainer 传入的
     对象结构是否完全吻合，只有真机训练才能最终确认。
 ```
+
+```
+B2（同一 session）
+做了什么：
+  - train/experiments/ 新包（六组对比编排，PLAN.md v2 微调版）：
+    `common.py`（`TrainingRunMetrics`/`LayerTypeProfileSplit`——v2 新增
+    的 GDN 层 vs 全注意力层显存/耗时占比字段——`compute_throughput_
+    tokens_per_s`/`compute_total_cost` 纯公式、`check_training_
+    experiment_precondition` 复用 A11 `assert_not_polluted` 同款一行、
+    `guard_dedicated_gpus` 复用 A8 `bench/gpu_guard.py::
+    guard_gpu_exclusivity` 按第4组"双卡"逐张检查）。
+  - `metrics_recorder.py` —— 本项目自己控制的 `experiment_metrics.json`
+    schema（不去反推 HF `trainer_state.json` 里没保证记录的字段），
+    `ExperimentMetricsCallback` 复用 B1 `callbacks.py` 的 guarded-继承
+    模式记录真实 wall-clock 单步耗时 + `torch.cuda.max_memory_
+    allocated()`。
+  - `peft_method_comparison.py`（组1-3：LoRA r=32/QLoRA 4bit bnb/
+    全参+ZeRO-3）—— 真实 LLaMA-Factory YAML 字段区分三法
+    （`finetuning_type`/`quantization_bit`+`quantization_method`/
+    `deepspeed`），`trainable_param_count_for_method` 纯函数复现
+    PLAN.md 说的"LoRA/QLoRA 只训 adapter，全参训全部"。
+  - `distributed_strategy_comparison.py`（组4：ZeRO-2/ZeRO-3/FSDP
+    双卡）—— 真实 DeepSpeed ZeRO JSON 配置 + 真实 Accelerate FSDP
+    配置 schema 都写了；FSDP 通过 `llamafactory-cli` 具体怎么拉起
+    这一步的调用形态本项目没有足够把握确认，`run_distributed_
+    strategy_comparison_group(FSDP)` 显式 `NotImplementedError`（同
+    A11 GPTQ 校准集缺口的处理方式），不是编一个看起来合理的命令行。
+  - `kernel_optimization_comparison.py`（组5-6：Liger Kernel on/off、
+    Flash Attention on/off、序列打包 on/off——读作三个独立开关而非
+    2x2 交叉，对应 PLAN.md"各200步"的措辞）——`KernelTogglePair`
+    算三项 delta 百分比。
+  - `report.py` —— PLAN.md 两条硬性框架规则直接写成代码而不是留给
+    写报告的人记住：`format_effect_cost_sentence` 从不出现"消融显示"
+    字样；`accuracy_delta_points` 是必填参数（不是可选默认 None 悄悄
+    省略），传 `None`（本沙箱唯一诚实状态）会生成一句显式的"尚无收敛
+    跑数据"，而不是一句从不提准确率的句子。句子里的中文一律用 ASCII
+    标点（不用全角，，。：）——ruff 的 RUF001 对全角标点在真实字符串
+    字面量里报错，项目里 B1 `smoke_test.py`已经定下"改写而不是加
+    suppression"的先例，这里沿用。
+  - `orchestrator.py` —— 直接复用 A11 `bench/experiments/common.py`
+    的 `ExperimentGroupOutcome`/`run_experiment_group_isolated`（本来
+    就是对"一组是什么"泛化的，训练侧原样能用），没有为训练侧重新
+    发明一套等价的隔离边界。
+  - `configs/train/experiments/` 三份 YAML —— `gpu_cost_per_hour`
+    刻意不作为字段出现（DD-0032），其余字段与 `configs/train/
+    sft_qwen3_5_9b.yaml` 保持一致（PLAN.md"严格控制变量"）。全部
+    验证过能被 `load_yaml_config` 真实加载。
+  - 单元测试 81 条（tests/unit/b2/：experiments_common 25、
+    metrics_recorder 7、peft_method_comparison 14、distributed_
+    strategy_comparison 15、kernel_optimization_comparison 10、
+    comparison_report 8、comparison_orchestrator 4——两个文件改名
+    避免与 a4/a11 撞 basename）、元测试 5 条（tests/meta/b2/：共享
+    precondition 通过真实 orchestrator 入口真实触发拒绝 + 不是永远
+    红；一个真实的 llamafactory-cli 不可用失败真实隔离、不拖累同批
+    次的兄弟组）、烟测 1 条（tests/smoke/b2/：两组对比走完整
+    orchestrator→report 链路，缩小到 2/6 组）。`make verify-b2`
+    （走泛用 `verify-%` 模式规则，无需新增 Makefile 目标）三段全绿；
+    mypy --strict 对 110 个源文件干净；全项目 800 个测试全绿，无
+    跨轮 regressions；`check_no_cheating src`/`check_placeholders
+    docs src` 均干净。
+
+遇到什么问题：
+  1. 第一版 `configs/train/experiments/peft_method_comparison.yaml`
+    给 `gpu_cost_per_hour` 写了个"看起来合理"的 `15.0`——写完之后
+    核对 FACTS.md 才发现 2×A100-80G 租卡成本全项目唯一有的数字是一个
+    "行情波动，以实际报价为准"的未确认区间，而 A8 的
+    `bench/cost_model.py` 早就为同类情况（RTX 5090 无确认价）定过
+    先例：把这类参数做成必填调用参数、从不做模块默认值。三处
+    `ExperimentConfig` 类和三份 YAML 都改成不含这个字段，
+    `run_*_comparison_group` 加一个必填 `gpu_cost_per_hour` 关键字
+    参数（DD-0032）。
+  2. `metrics_recorder.py::_real_peak_memory_bytes` 第一版在
+    `except ImportError` 分支写了 `return 0`——写完全部代码后按例行
+    习惯跑 `scripts/check_no_cheating.py src`，真的报了一条
+    `[EXCEPT_RETURN_CONSTANT]`：这正是 CLAUDE.md §1.1/§2 点名禁止的
+    "缺失指标补 0"模式本身，不是误报。改成 `int | None`、缺测返回
+    `None`，新增 `require_measured_peak_memory` 作为下游构造
+    `TrainingRunMetrics`（该类型自己的 `peak_memory_bytes` 仍是必填
+    `int`——这是四个核心数字之一，不允许缺）前的硬失败关卡
+    （DD-0033）。这是本轮最有价值的一次自查——检查器不是摆设，这次
+    真的抓住了一处会污染下游对比数字的真实 bug。
+  3. FSDP 通过 LLaMA-Factory 具体怎么拉起（是走 `accelerate launch`
+    包一层，还是 `FORCE_TORCHRUN` 之类的环境变量，还是别的机制）
+    本项目没能查到足够确定的依据——没有编一个看起来合理但可能是错的
+    命令行，`run_distributed_strategy_comparison_group(FSDP)` 显式
+    `NotImplementedError`，Accelerate FSDP 配置 schema 本身仍然
+    照常写（这部分有把握），只把"怎么调用"这一步留白。
+  4. B2 第三次撞上 test basename 冲突（`test_common.py` 撞 A11、
+    `test_report.py` 撞 A4）——继续沿用例行 pre-commit 检查命令，
+    改名为 `test_experiments_common.py`/`test_comparison_report.py`，
+    顺带把 `test_orchestrator.py`（会撞 A10）提前改名为
+    `test_comparison_orchestrator.py`，没有等冲突真的发生再改。
+
+怎么解决的：见上。
+
+测出什么数字：无（无 GPU，六组对比一条真实短跑都没能执行——本沙箱
+连 `llamafactory-cli` 都没装）。烟测里的显存/吞吐/成本数字全部来自
+手写的合成 `experiment_metrics.json`，只验证 orchestrator→report 链路
+本身接得通，不是任何真实短跑的结果，不得被任何报告或简历引用。
+
+诚实清单：
+  - 没做：任何一组的真实 200/300 步短跑（LLaMA-Factory 未装、无 GPU）；
+    `communication_time_ratio` 的真实测量（这个模块从不自己测通信
+    时间，只在 `RawExperimentMetrics` 里留了一个可选字段，等外部真实
+    NCCL/DeepSpeed trace 数据填入）；`LayerTypeProfileSplit`（v2 新增
+    的 GDN vs 全注意力层显存/耗时占比）从未在任何 `run_*_comparison_
+    group` 里被真实填充过——三个函数返回的 `TrainingRunMetrics.
+    layer_type_split` 全部是 `None`，这个字段目前只有它自己的单元
+    测试（构造+校验+占比计算）验证过逻辑正确，没有一条真实的采集
+    路径把它接到 `ExperimentMetricsCallback` 里。
+  - 假设了什么：LLaMA-Factory 的 `flash_attn`/`packing`/`enable_liger_
+    kernel`/`quantization_bit`+`quantization_method`/`deepspeed` 几个
+    YAML 字段名是这个项目当前查到的、认为正确的写法，未在真实
+    LLaMA-Factory 安装上验证过（同 B1 `sft_config.py` 的诚实标注）；
+    ZeRO-2/ZeRO-3 用 `FORCE_TORCHRUN=1`+`NPROC_PER_NODE` 环境变量拉起
+    多卡是本项目对 LLaMA-Factory 文档的最佳理解，同样未验证。
+  - 已知局限：六个对比组从未被证明能在真实环境里端到端跑通哪怕一次
+    ——每个 `run_*_comparison_group` 在本沙箱里唯一被测到的分支是
+    "llamafactory-cli 不在 PATH 上，正确拒绝"，真实的"subprocess 跑完
+    →真实 experiment_metrics.json 写出→真实 TrainingRunMetrics 构造"
+    这条主链路只在烟测里用合成数据模拟过，没有一次是对着真实子进程
+    输出走过的。
+```

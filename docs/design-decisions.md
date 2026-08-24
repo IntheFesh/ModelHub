@@ -939,3 +939,69 @@
 - 实测数字：`tests/unit/b1/test_dry_run.py::TestEstimateTrainingMemory`
   用这组常数在 batch_size=4/max_seq_len=4096 下算出 headroom≈59.6%——
   这是公式本身的正确性验证，不是显存占用的真实测量结果。
+
+---
+
+## DD-0032 · gpu_cost_per_hour 不进 config，做成必填调用参数
+
+- 日期：2026-08-24 · Run: 无（无 GPU，本轮不产生真实成本数字）
+- 决策：`train/experiments/{peft_method,distributed_strategy,kernel_
+  optimization}_comparison.py` 三个 `run_*_comparison_group` 函数把
+  `gpu_cost_per_hour` 做成必填关键字参数，不放进对应的
+  `*ExperimentConfig` pydantic 类、也不写进任何 checked-in YAML。
+- 考虑过：像其余字段一样把 `gpu_cost_per_hour` 写进
+  `configs/train/experiments/*.yaml`，给一个"看起来合理"的默认值
+  （最初写过 `15.0`）。
+- 为什么不这么做：写完第一版后核对 FACTS.md，发现全项目对
+  2×A100-80G 租卡成本唯一有的数字是一个未确认区间（"海外 $112–180；
+  国内 ¥450–630，行情波动，以实际报价为准"），并非可以直接当常数用
+  的确定值——而 `src/modelhub/bench/cost_model.py`（A8）早就为同一类
+  问题（RTX 5090 无确认租卡价）定了先例：`gpu_hourly_cost_usd` 处处
+  作为必填调用参数出现，从不作为模块内置默认值，理由写在那个模块的
+  文档字符串里——"inventing a plausible-looking default would be
+  exactly the kind of unverified number CLAUDE.md Section 12 forbids
+  treating as settled"。B2 沿用同一纪律，而不是每个新模块各自发明一次
+  "写一个看起来合理的数字"的处理方式。
+- 什么情况会失效：一旦真的拿到当天的真实报价（FACTS.md 待办 #8：
+  "租卡平台价格与现货 → 查平台报价"），调用方在真机脚本里传入这个真实
+  数字即可，`run_*_comparison_group` 的签名不需要变。
+- 实测数字：无——`compute_total_cost`（train/experiments/common.py）
+  本身的正确性由 `tests/unit/b2/test_experiments_common.py::
+  TestComputeTotalCost` 用任意常数验证过，不依赖某个特定的
+  `gpu_cost_per_hour` 值。
+
+---
+
+## DD-0033 · B2 显存峰值缺测记为 None，不记 0（自查修复）
+
+- 日期：2026-08-24 · Run: 无
+- 决策：`train/experiments/metrics_recorder.py::RawExperimentMetrics.
+  peak_memory_bytes` 类型是 `int | None`（不是 `int`），`_real_peak_
+  memory_bytes` 在 torch 未安装或无 CUDA 设备时返回 `None`（不是
+  `0`）；新增 `require_measured_peak_memory` 作为每个
+  `run_*_comparison_group` 构造可比较的 `TrainingRunMetrics` 前必须
+  经过的硬失败关卡——`TrainingRunMetrics.peak_memory_bytes`本身仍是
+  必填的普通 `int`（这是 B2 四个核心数字之一，不允许缺测），缺失时是
+  硬拒绝，不是拿 `None` 悄悄垫成 0 再继续跑。
+- 考虑过：保持最初写法——`_real_peak_memory_bytes` 在 `except
+  ImportError` 分支里直接 `return 0`。
+- 为什么不这么做：写完第一版跑 `scripts/check_no_cheating.py src`
+  时，反作弊扫描器真的对这一行报了 `[EXCEPT_RETURN_CONSTANT]`——这
+  正是 CLAUDE.md §1.1 点名的反面教材本身（"except Exception: return
+  0.0"），也正是 §2 强调的"`gpu_util = metrics.get('gpu_util', 0)`
+  ❌ 缺失指标补 0"那条禁令。本沙箱没有 CUDA 设备，`_real_peak_memory_
+  bytes` 在这里唯一会走到的分支就是"测不到"，如果把"测不到"和"测到
+  了、结果是 0 字节"用同一个返回值表达，下游任何一次显存对比都会把
+  一个从未真正测量过的数字当成真实的 0 字节峰值参与计算——这在
+  精神上和 GPU_UTIL 缺失补 0 是同一类錯误。检查器抓到的不是误报，是
+  一个真实引入的反作弊违规，当场按 CLAUDE.md 的强制写法改正，而不是
+  给这一行加 allowlist。
+- 什么情况会失效：不会——这是本项目自己的检测工具在本轮实际抓到的
+  一个真实 bug，属于"检查器确实起作用了"的证据，不是需要重新评估的
+  设计权衡。
+- 实测数字：`tests/unit/b2/test_metrics_recorder.py::
+  TestExperimentMetricsCallback::test_records_step_timing_and_writes_
+  a_valid_file` 断言本沙箱里 `raw.peak_memory_bytes is None`（不是
+  `== 0`）；`TestRequireMeasuredPeakMemory` 两个用例分别验证"有真实值
+  就透传"和"是 None 就硬拒绝"；修复后 `scripts/check_no_cheating.py
+  src` 重新跑一遍确认这一条 finding 消失，且未新增其他 finding。
