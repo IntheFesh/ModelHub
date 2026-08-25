@@ -138,6 +138,63 @@ class TestRunTaskWithWatchdog:
         assert outcome.status is night_queue.QueueTaskStatus.FAILED
         assert "watchdog_timeout_s" in (outcome.detail or "")
 
+    def test_watchdog_timeout_returns_promptly_without_waiting_for_the_abandoned_thread(
+        self,
+    ) -> None:
+        # Regression test for a real bug this pass found: the original
+        # implementation used `with ThreadPoolExecutor(...) as pool:`,
+        # whose __exit__ calls shutdown(wait=True) by default — since
+        # Python cannot forcibly kill a thread, that blocked this
+        # function until the abandoned task actually finished, silently
+        # defeating "the watchdog starts the next task immediately"
+        # (CLAUDE.md §6.2's "GPU 禁止空转"). This uses REAL wall-clock
+        # time (not a fake clock) specifically to catch that regression:
+        # a task that sleeps far longer than its watchdog_timeout_s must
+        # still return in close to watchdog_timeout_s, not in close to
+        # the task's own sleep duration.
+        import time
+
+        def _much_slower_than_the_timeout() -> None:
+            time.sleep(2.0)
+
+        wall_start = time.monotonic()
+        outcome = night_queue.run_task_with_watchdog(
+            _task("t0", run=_much_slower_than_the_timeout, watchdog_timeout_s=0.1)
+        )
+        wall_elapsed = time.monotonic() - wall_start
+        assert outcome.status is night_queue.QueueTaskStatus.FAILED
+        # generous upper bound (1.0s) vs. the 2.0s the abandoned thread
+        # actually needs — proves the loop was not blocked waiting on it.
+        assert wall_elapsed < 1.0, (
+            f"run_task_with_watchdog took {wall_elapsed:.2f}s to return after a "
+            f"0.1s watchdog_timeout_s — it appears to be blocking on the "
+            f"abandoned thread instead of returning promptly"
+        )
+
+    def test_smoke_test_raising_is_failed_not_propagated(self) -> None:
+        # Regression test for a real bug this pass found: task.smoke_test()
+        # was called outside run_task_with_watchdog's try/except, so a
+        # raising smoke_test used to propagate straight out and crash the
+        # entire night_queue run — a materially different, unhandled
+        # failure mode compared to task.run() raising (which was already
+        # caught). This must degrade to the same "one task's failure never
+        # blocks the rest of the queue" guarantee as every other failure.
+        calls = {"ran": False}
+
+        def _run() -> None:
+            calls["ran"] = True
+
+        def _smoke_test_that_raises() -> CheckStatus:
+            raise RuntimeError("smoke probe itself is broken")
+
+        outcome = night_queue.run_task_with_watchdog(
+            _task("t0", run=_run, smoke_test=_smoke_test_that_raises)
+        )
+        assert calls["ran"] is False
+        assert outcome.status is night_queue.QueueTaskStatus.FAILED
+        assert "smoke_test raised" in (outcome.detail or "")
+        assert "smoke probe itself is broken" in (outcome.detail or "")
+
 
 class TestQueueSnapshot:
     def test_write_and_read_back(self, tmp_path: Path) -> None:

@@ -163,6 +163,46 @@ def test_allowlist_comment_does_not_suppress_a_different_rule() -> None:
     assert matching[0].allowlisted is False
 
 
+def test_todo_comment_scan_survives_encoding_cookie_mismatch() -> None:
+    # A `# coding: ...` cookie that doesn't match the file's actual bytes
+    # makes tokenize.tokenize() raise SyntaxError or UnicodeDecodeError from
+    # its own decode step, even though ast.parse() (which scan_source() runs
+    # first, on the original str) succeeds fine. This must degrade to "no
+    # TODO comment lines found" rather than crash the whole scan — this is
+    # the exact bug the checker's own §1.1 doctrine warns about: an
+    # unhandled exception here would abort `make check-cheating` outright
+    # instead of the intended graceful best-effort comment scan.
+    src = "# -*- coding: ascii -*-\nx = 'café'  # TODO: this comment must not crash the scan\n"
+    findings = scan_source(src, "src/modelhub/fake/module.py")
+    assert findings == []
+
+
+def test_unreadable_file_is_flagged_not_silently_skipped(tmp_path: Path) -> None:
+    # Regression test: scan_file used to `except (OSError, UnicodeDecodeError):
+    # return []` — a src/ .py file the scanner can't even read used to
+    # silently count as "0 findings, clean", the exact skip-counted-as-pass
+    # pattern CLAUDE.md §1.3 forbids, just at file-discovery time instead
+    # of a capability probe. It must show up as a real, non-allowlistable
+    # finding instead (the file's content can't carry an `allow=` comment
+    # if it can't be read at all).
+    from check_no_cheating import scan_file
+
+    f = tmp_path / "unreadable.py"
+    f.write_bytes(b"\xff\xfe not valid utf-8 \x00\x01")
+    findings = scan_file(f)
+    assert len(findings) == 1
+    assert findings[0].rule == "FILE_UNREADABLE"
+    assert findings[0].allowlisted is False
+
+
+def test_unreadable_file_fails_main_exit_code(tmp_path: Path) -> None:
+    from check_no_cheating import main
+
+    f = tmp_path / "unreadable.py"
+    f.write_bytes(b"\xff\xfe not valid utf-8 \x00\x01")
+    assert main([str(tmp_path)]) == 1
+
+
 def test_allowlisted_finding_does_not_fail_main_exit_code(tmp_path: Path) -> None:
     from check_no_cheating import main
 

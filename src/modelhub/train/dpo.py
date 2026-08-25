@@ -27,6 +27,14 @@ Discarded outright, never entering a pair either side (PLAN.md ★★):
     model to chase noise (CLAUDE.md §2.3).
   - `UNDECIDABLE` (gold SQL itself failed to execute) and
     `OUTPUT_TRUNCATED` — neither is a real correctness signal.
+  - `UNCLASSIFIED` (`ErrorCode.UNCLASSIFIED` — CLAUDE.md §2.2's one
+    permitted catch-all) — fault attribution is genuinely unknown, so it
+    must not be folded into `EXEC_FAILED` (that would silently blame the
+    model for what might be a harness bug, exactly the §2.3 hazard) nor
+    treated as a system fault outright (we don't actually know that
+    either). Discarded like the others, but tracked under its own
+    `unclassified_rate` with a hard-abort threshold — CLAUDE.md §2.2:
+    "它是待办清单，不是垃圾桶。占比 > 1% → 评估/训练中止."
 
 Same-tier pairs are never built ("同级内不配对") — every pair's chosen
 side is strictly better-tiered than its rejected side.
@@ -46,6 +54,7 @@ from modelhub.common.errors import ErrorCode
 from modelhub.compare.result_types import ComparisonResult
 from modelhub.data.schema import NormalizedSample
 from modelhub.eval.gold_cache import GoldExecCache
+from modelhub.eval.metrics import HARNESS_ERROR_FLOOD_THRESHOLD
 from modelhub.eval.model_client import ModelClient
 from modelhub.eval.records import PredictionRecord
 from modelhub.eval.runner import run_one_sample
@@ -79,6 +88,7 @@ class DiscardReason(StrEnum):
     HARNESS_ERROR = "HARNESS_ERROR"
     UNDECIDABLE = "UNDECIDABLE"
     OUTPUT_TRUNCATED = "OUTPUT_TRUNCATED"
+    UNCLASSIFIED = "UNCLASSIFIED"
 
 
 @dataclass(frozen=True)
@@ -123,6 +133,8 @@ def classify_prediction(
         return _classified(tier=None, discard_reason=DiscardReason.OUTPUT_TRUNCATED)
     if prediction.comparison_result is ComparisonResult.UNDECIDABLE:
         return _classified(tier=None, discard_reason=DiscardReason.UNDECIDABLE)
+    if prediction.exec_code is ErrorCode.UNCLASSIFIED:
+        return _classified(tier=None, discard_reason=DiscardReason.UNCLASSIFIED)
     if prediction.exec_code is ErrorCode.EXEC_OK:
         tier = (
             PreferenceTier.EXEC_OK_CORRECT
@@ -225,6 +237,33 @@ class PreferenceDatasetReport:
             raise ValueError("no kept candidates — cannot express exec_ok_correct_share")
         return tiers[PreferenceTier.EXEC_OK_CORRECT.value] / kept_total
 
+    @property
+    def unclassified_rate(self) -> float:
+        """Share of ALL candidates (kept + discarded) that hit the
+        `UNCLASSIFIED` escape hatch — CLAUDE.md §2.2's own denominator
+        ("命中...占比 > 1%") is over every sample the harness saw, not
+        just the kept ones."""
+        if self.total_candidates == 0:
+            raise ValueError("no candidates — cannot express unclassified_rate")
+        return self.discard_counts[DiscardReason.UNCLASSIFIED.value] / self.total_candidates
+
+
+def assert_unclassified_rate_ok(
+    report: PreferenceDatasetReport, *, threshold: float = HARNESS_ERROR_FLOOD_THRESHOLD
+) -> None:
+    """CLAUDE.md §2.2: "占比 > 1% → 评估/训练中止" — reuses A4's own 1%
+    flood threshold (same real hazard: an unclassified bucket this large
+    means the sandbox/comparator doesn't understand a growing share of
+    outcomes, not that the model got worse)."""
+    rate = report.unclassified_rate
+    if rate > threshold:
+        raise ValueError(
+            f"unclassified_rate {rate:.2%} exceeds the allowed {threshold:.0%} — refusing to "
+            f"build a DPO preference dataset (CLAUDE.md §2.2: 占比 > 1% → 训练中止). "
+            f"UNCLASSIFIED is a todo list, not a trash bin — investigate the sqlexec "
+            f"classifier gap before sampling more candidates."
+        )
+
 
 def build_preference_dataset(
     predictions_by_question: Mapping[str, Sequence[PredictionRecord]],
@@ -235,7 +274,9 @@ def build_preference_dataset(
         build_preference_pairs_for_question(qid, preds)
         for qid, preds in predictions_by_question.items()
     )
-    return PreferenceDatasetReport(per_question=per_question)
+    report = PreferenceDatasetReport(per_question=per_question)
+    assert_unclassified_rate_ok(report)
+    return report
 
 
 _HIGH_CORRECT_SHARE_THRESHOLD = 0.7
@@ -368,6 +409,7 @@ __all__ = [
     "PreferencePair",
     "PreferenceTier",
     "QuestionPreferenceResult",
+    "assert_unclassified_rate_ok",
     "assess_expected_dpo_benefit",
     "build_dpo_config_kwargs",
     "build_preference_dataset",

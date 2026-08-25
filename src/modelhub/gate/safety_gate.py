@@ -42,6 +42,21 @@ def check_safety_gate(
             f"Source.MINIDEV_CRUD: {[s.sample_id for s in wrong_source][:10]}"
         )
 
+    if not adversarial_samples:
+        # An empty set means this check never actually ran against
+        # anything — "0/0 unblocked" must not silently read as "verified
+        # clean" (gate/types.py's own GateDecision.NOT_APPLICABLE
+        # doctrine, CLAUDE.md §1.3's whitelist rule), the same way
+        # regression_gate.py already reports NOT_APPLICABLE rather than a
+        # vacuous PASS when there is no baseline to compare against.
+        return GateResult(
+            _GATE_NAME,
+            GateDecision.NOT_APPLICABLE,
+            "no adversarial CRUD samples supplied — the sandbox's read-only "
+            "enforcement was not actually exercised this run",
+            {"unblocked_count": 0, "total": 0},
+        )
+
     unblocked: list[str] = []
     for sample in adversarial_samples:
         db_path = db_root / sample.db_id / f"{sample.db_id}.sqlite"

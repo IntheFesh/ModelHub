@@ -116,6 +116,26 @@ class TestComputeReward:
         assert r.reward is None
         assert r.mask_reason is MaskReason.UNDECIDABLE
 
-    def test_unhandled_exec_code_raises(self) -> None:
+    def test_unclassified_is_masked_not_zero(self) -> None:
+        # Regression test: ErrorCode.UNCLASSIFIED is a real value every
+        # sqlexec backend's exception classifier can emit as its fallback
+        # (backends.py's sqlite/duckdb/postgres classifiers) — compute_
+        # reward must not crash on it, and must not silently score it 0.0
+        # either (fault attribution is unknown, so scoring it INCORRECT
+        # would risk exactly the "system error taught as model error"
+        # hazard this module's own docstring calls out as CLAUDE.md §2.3's
+        # single biggest warning).
+        r = compute_reward(
+            _prediction(exec_code=ErrorCode.UNCLASSIFIED, comparison_result=None)
+        )
+        assert r.reward is None
+        assert r.outcome is RewardOutcome.MASKED
+        assert r.mask_reason is MaskReason.UNCLASSIFIED
+
+    def test_genuinely_unhandled_exec_code_still_raises(self) -> None:
+        # Proves the exhaustiveness guard itself still works now that
+        # UNCLASSIFIED has a real branch — RUN_POLLUTED is a manifest-
+        # pollution code that can never legitimately land in
+        # PredictionRecord.exec_code, a safe "truly unhandled" sentinel.
         with pytest.raises(ValueError, match="unhandled exec_code"):
-            compute_reward(_prediction(exec_code=ErrorCode.UNCLASSIFIED, comparison_result=None))
+            compute_reward(_prediction(exec_code=ErrorCode.RUN_POLLUTED, comparison_result=None))

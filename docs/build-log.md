@@ -1658,3 +1658,92 @@ json`/`20260824/manifests/*.json`——一次真实 `make night-queue`
     数字必须能追溯到一次真实 run 的落盘产物"这条铁律，逐条真机复核
     后才能对外引用。
 ```
+
+```
+多角度复核 D0-D20 全部 19 轮（用户明确要求"多多做一些检测，多个角度去
+做测试测验，尽可能保证不出错"）—— 不是新的一轮 PLAN.md 任务，是对已经
+"完成"的 19 轮做一次独立、对抗性的第二遍验证
+做了什么：
+  - 机械检查：全量测试跑 3 遍（917 passed / 32 honest skip / 4
+    requires_network|requires_gpu deselect，三遍完全一致，未复现此前
+    观察到的 a2/test_pool.py 一次性并发计时 flake）；`ruff check
+    src tests scripts`、`mypy --strict src/modelhub`（125 源文件）、
+    `mypy --strict` 对 `scripts/*.py` + `scripts/night_queue_fixtures/
+    *.py` 逐文件跑（该目录不在 CI 强制范围但保持同等标准）；
+    `check_no_cheating.py src`、`check_placeholders.py docs src`；
+    `tests/{unit,meta,smoke}/`全树 basename 去重扫描确认无冲突。
+  - 派 4 个独立 subagent 对本 session 里最高风险/最新颖的逻辑做对抗性
+    复核（各自独立读代码、不共享彼此结论）：B3 门禁映射（`bad_model_
+    drill.py`）、B4 DPO 分档穷尽性（`dpo.py::classify_prediction`）、
+    B5 GRPO reward masking 穷尽性（`reward.py::compute_reward` +
+    `step_diagnostics.py`）、night_queue watchdog/interrupt 语义
+    （`run_task_with_watchdog`）。四份报告共发现 6 个真实问题（非
+    风格建议），全部复现确认后修复：
+    1. `scripts/check_no_cheating.py`：`tokenize.TokenizeError`
+       拼错（真实异常名是 `tokenize.TokenError`），且
+       `_comment_lines_with_todo`/`scan_file`原来对不可读文件
+       （`OSError`/`UnicodeDecodeError`）直接静默 `return []`/
+       `continue`——同一个"skip 不算 pass"问题在文件发现层重演。
+    2. `scripts/check_placeholders.py`：同样的"不可读文件静默跳过"
+       问题（`scan()`吞掉 `OSError`/`UnicodeDecodeError`不留痕迹）。
+    3. B4 `train/dpo.py::classify_prediction` 对 `ErrorCode.
+       UNCLASSIFIED`（sqlexec 三个后端异常分类器的真实兜底值，非
+       假设场景）直接 `raise`，会在真实采样时被一次意外 DB 报错
+       打崩整个 `build_preference_dataset`。
+    4. B5 `train/grpo/reward.py::compute_reward` 同一个 UNCLASSIFIED
+       漏洞；且 `step_diagnostics.py`的 `harness_error_rate`只覆盖
+       `HARNESS_DB_UNAVAILABLE`/`HARNESS_INTERNAL`，UNCLASSIFIED
+       占比再高也不会触发任何中止阈值。
+    5. `scripts/night_queue.py::run_task_with_watchdog`：`task.
+       smoke_test()`调用原来在 try/except 之外，探针自己抛异常会
+       直接打崩整条队列（跟 `task.run()`抛异常已经被正确捕获形成
+       不一致的处理）；且 `with ThreadPoolExecutor(...) as pool:`
+       默认 `shutdown(wait=True)`，真超时时会一直卡等被放弃的线程，
+       watchdog 保护被自己的清理逻辑打穿。
+    6. B3 `scripts/bad_model_drill.py`：门禁阈值手写在脚本里，跟
+       仓库已提交的 `configs/gate/admission.yaml`不一致（且全仓库
+       没有任何地方真的加载过这个 yaml），代入真实阈值重算后
+       ckpt-B/ckpt-D 两个"应该被拒绝"的合成 checkpoint 实际会 PASS。
+  - 逐条修复并补对应的回归测试/元测试（新增/改写约 15 个测试文件），
+    详细决策见 DD-0038/DD-0039/DD-0040；`gate/safety_gate.py`额外
+    补了一个复核中顺带发现的小问题（空 `adversarial_samples`列表
+    原来读作 PASS，改成 `NOT_APPLICABLE`，跟 `regression_gate.py`
+    已有的"无 baseline"先例一致）。
+  - 真实重跑 `scripts/bad_model_drill.py`（DD-0038 修复后），产出
+    三条新的、基于真实门禁阈值的 `docs/incident-log.md` REJECT 记录
+    （2026-08-24T14:54:40 前后），旧的、基于错误影子配置的三条记录
+    保留不改写（incident log 追加写，不改历史）。
+
+遇到什么问题：见上面 6 点，逐条对应的根因分析和修复方案见
+`docs/design-decisions.md` DD-0038/DD-0039/DD-0040。
+
+怎么解决的：见上。
+
+测出什么数字：`docs/incident-log.md`2026-08-24T14:54:40 前后三条
+真实 REJECT 记录（ckpt-A accuracy 20.00%<30.00%、ckpt-B regression
+15>10、ckpt-D accuracy 25.00%<30.00%，均代入真实 `configs/gate/
+admission.yaml`阈值算出，非估算）；修复后全项目测试从 949 条增至约
+1000+ 条（新增/改写的回归测试），全绿；`test_watchdog_timeout_
+returns_promptly_without_waiting_for_the_abandoned_thread`用真实
+wall-clock 验证 watchdog 修复前会稳定多卡 2 秒以上、修复后同一批
+26 个 night_queue 测试合计仅耗时 0.22 秒，是可复现的真实计时证据。
+
+诚实清单：
+  - 没做：没有对 A0-A12（推理侧 13 轮）做同等深度的独立 agent 对抗性
+    复核——本次 4 个 subagent 的复核范围集中在用户最近关注、也是
+    本 session 最新写出的 B3-B5 + night_queue 四块；A 道此前各轮
+    收尾时已有的元测试/check_no_cheating/mypy strict 覆盖仍然有效，
+    但没有再派独立视角去专门找 A 道的深层逻辑 bug，不能排除类似
+    UNCLASSIFIED 漏洞的问题在 A 道其他地方也存在。
+  - 假设了什么：假设 4 个 subagent 各自独立复核、互不共享上下文，
+    足以覆盖"同一个人复核自己写的代码容易漏看的盲区"这个风险——
+    但 subagent 用的仍然是同一个底层模型，不是真正意义上的独立
+    第三方审查。
+  - 已知局限：这次复核发现的 6 个问题全部是本 session 自己写的代码
+    里的真实 bug，说明"写完当轮就跑单元/元测试+反作弊扫描"这套流程
+    本身不足以捕获跨模块的语义不一致（比如 UNCLASSIFIED 在 A0 定义、
+    在 A2/A4 产生、在 B4/B5 消费，链路跨了 4 轮，没有任何单轮的
+    per-round meta-test 天然覆盖这种跨轮一致性）；后续任何新增轮次
+    如果引入新的跨轮共享概念（新的 ErrorCode 成员、新的阈值常量），
+    都应该主动检查所有消费方是否同步更新，而不能只验证新增代码本身。
+```

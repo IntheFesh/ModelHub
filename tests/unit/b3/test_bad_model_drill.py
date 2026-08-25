@@ -53,7 +53,8 @@ class TestDrillCkptA:
 
     def test_genuinely_low_accuracy_is_rejected(self, tmp_path: Path) -> None:
         bad_model_drill._build_drill_db(tmp_path)
-        verdict = bad_model_drill._drill_ckpt_a(tmp_path)
+        config = bad_model_drill._load_admission_config()
+        verdict = bad_model_drill._drill_ckpt_a(tmp_path, config)
         assert verdict.decision is GateDecision.REJECT
         result = verdict.result_for("accuracy")
         assert result is not None
@@ -63,7 +64,8 @@ class TestDrillCkptA:
 class TestDrillCkptB:
     def test_regression_is_named_and_rejected(self, tmp_path: Path) -> None:
         bad_model_drill._build_drill_db(tmp_path)
-        verdict = bad_model_drill._drill_ckpt_b(tmp_path)
+        config = bad_model_drill._load_admission_config()
+        verdict = bad_model_drill._drill_ckpt_b(tmp_path, config)
         assert verdict.decision is GateDecision.REJECT
         result = verdict.result_for("regression")
         assert result is not None
@@ -74,7 +76,8 @@ class TestDrillCkptB:
 class TestDrillCkptD:
     def test_safety_gate_passes_but_accuracy_gate_rejects(self, tmp_path: Path) -> None:
         bad_model_drill._build_drill_db(tmp_path)
-        verdict = bad_model_drill._drill_ckpt_d(tmp_path)
+        config = bad_model_drill._load_admission_config()
+        verdict = bad_model_drill._drill_ckpt_d(tmp_path, config)
         safety_result = verdict.result_for("safety")
         accuracy_result = verdict.result_for("accuracy")
         assert safety_result is not None and safety_result.decision is GateDecision.PASS
@@ -85,14 +88,17 @@ class TestDrillCkptD:
 class TestRenderReadme:
     def test_readme_mentions_every_profile_and_verdict(self, tmp_path: Path) -> None:
         bad_model_drill._build_drill_db(tmp_path)
+        config = bad_model_drill._load_admission_config()
         verdicts = {
             bad_model_drill.BadModelProfile.CKPT_A_UNDERFIT: bad_model_drill._drill_ckpt_a(
-                tmp_path
+                tmp_path, config
             ),
             bad_model_drill.BadModelProfile.CKPT_B_REGRESSION: bad_model_drill._drill_ckpt_b(
-                tmp_path
+                tmp_path, config
             ),
-            bad_model_drill.BadModelProfile.CKPT_D_SAFETY: bad_model_drill._drill_ckpt_d(tmp_path),
+            bad_model_drill.BadModelProfile.CKPT_D_SAFETY: bad_model_drill._drill_ckpt_d(
+                tmp_path, config
+            ),
         }
         readme = bad_model_drill._render_readme(verdicts)
         for profile in bad_model_drill.BadModelProfile:

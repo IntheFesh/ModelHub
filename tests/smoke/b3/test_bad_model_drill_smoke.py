@@ -21,11 +21,18 @@ from modelhub.release.incident_log import gate_rejection_incident
 
 def test_full_drill_sequence_end_to_end(tmp_path: Path) -> None:
     bad_model_drill._build_drill_db(tmp_path)
+    config = bad_model_drill._load_admission_config()
 
     verdicts = {
-        bad_model_drill.BadModelProfile.CKPT_A_UNDERFIT: bad_model_drill._drill_ckpt_a(tmp_path),
-        bad_model_drill.BadModelProfile.CKPT_B_REGRESSION: bad_model_drill._drill_ckpt_b(tmp_path),
-        bad_model_drill.BadModelProfile.CKPT_D_SAFETY: bad_model_drill._drill_ckpt_d(tmp_path),
+        bad_model_drill.BadModelProfile.CKPT_A_UNDERFIT: bad_model_drill._drill_ckpt_a(
+            tmp_path, config
+        ),
+        bad_model_drill.BadModelProfile.CKPT_B_REGRESSION: bad_model_drill._drill_ckpt_b(
+            tmp_path, config
+        ),
+        bad_model_drill.BadModelProfile.CKPT_D_SAFETY: bad_model_drill._drill_ckpt_d(
+            tmp_path, config
+        ),
     }
 
     for profile, verdict in verdicts.items():

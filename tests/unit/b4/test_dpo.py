@@ -110,10 +110,28 @@ class TestClassifyPrediction:
         )
         assert c.discard_reason is DiscardReason.UNDECIDABLE
 
-    def test_unhandled_exec_code_raises(self) -> None:
+    def test_unclassified_is_discarded_not_tiered_and_not_raised(self) -> None:
+        # Regression test: ErrorCode.UNCLASSIFIED is a real value every
+        # sqlexec backend's exception classifier can and does emit as its
+        # fallback (backends.py's sqlite/duckdb/postgres classifiers all
+        # return it for an unrecognized DB error) — classify_prediction
+        # must not crash on real eval-pipeline output. It also must not be
+        # silently folded into EXEC_FAILED (that would blame the model for
+        # a possibly-system-side bug CLAUDE.md §2.3 explicitly warns
+        # about), so it gets its own discard reason.
+        c = classify_prediction(
+            "q0", 0, _prediction(exec_code=ErrorCode.UNCLASSIFIED, comparison_result=None)
+        )
+        assert c.tier is None
+        assert c.discard_reason is DiscardReason.UNCLASSIFIED
+
+    def test_genuinely_unhandled_exec_code_still_raises(self) -> None:
+        # classify_prediction's whitelist must still hard-fail on a code it
+        # was never taught about — proves the exhaustiveness guard itself
+        # still works now that UNCLASSIFIED has a real branch.
         with pytest.raises(ValueError, match="unhandled exec_code"):
             classify_prediction(
-                "q0", 0, _prediction(exec_code=ErrorCode.UNCLASSIFIED, comparison_result=None)
+                "q0", 0, _prediction(exec_code=ErrorCode.RUN_POLLUTED, comparison_result=None)
             )
 
 
@@ -194,6 +212,36 @@ class TestBuildPreferenceDataset:
         ]
         report = build_preference_dataset({"q0": q0})
         assert report.discard_counts[DiscardReason.HARNESS_ERROR.value] == 1
+
+    def test_unclassified_rate_within_threshold_builds_normally(self) -> None:
+        # 1 unclassified out of 100 candidates == 1%, not > 1%, so this must
+        # not raise (CLAUDE.md §2.2's threshold is strictly "> 1%").
+        q0 = [_prediction(predicted_sql=f"c{i}") for i in range(99)] + [
+            _prediction(
+                predicted_sql="mystery", exec_code=ErrorCode.UNCLASSIFIED, comparison_result=None
+            )
+        ]
+        report = build_preference_dataset({"q0": q0})
+        assert report.discard_counts[DiscardReason.UNCLASSIFIED.value] == 1
+        assert report.unclassified_rate == pytest.approx(0.01)
+
+    def test_unclassified_flood_aborts_dataset_build(self) -> None:
+        # Meta-test-shaped: inject a guaranteed-over-threshold unclassified
+        # rate and assert build_preference_dataset actually refuses to
+        # build a dataset, rather than silently training on a mostly-
+        # unexplained sandbox (CLAUDE.md §1.5 test_skip_is_not_pass sibling
+        # — an unclassified flood must not silently pass as "just some
+        # discards").
+        q0 = [
+            _prediction(
+                predicted_sql=f"mystery{i}",
+                exec_code=ErrorCode.UNCLASSIFIED,
+                comparison_result=None,
+            )
+            for i in range(5)
+        ] + [_prediction(predicted_sql="c0")]
+        with pytest.raises(ValueError, match="unclassified_rate"):
+            build_preference_dataset({"q0": q0})
 
 
 class TestAssessExpectedDpoBenefit:

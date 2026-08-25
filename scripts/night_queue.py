@@ -20,9 +20,15 @@ Requirements, each mapped directly onto a piece of this module:
    instant one task's `run()` returns, raises, or its own
    `watchdog_timeout_s` safety-net timeout fires) — GPU never sits idle
    waiting on this orchestrator. The per-task timeout is a real
-   `ThreadPoolExecutor` + `Future.result(timeout=...)`, the same
-   concurrency primitive `sqlexec/pool.py` already uses for the
-   identical "don't let one task hang everything" problem.
+   `ThreadPoolExecutor` + `Future.result(timeout=...)`, shut down with
+   `wait=False` on every exit path (not the default `with`-block
+   `wait=True`) so a timed-out task's thread — which Python cannot
+   forcibly kill — never blocks the loop from moving on; unlike
+   `sqlexec/pool.py`'s subprocess-based hard kill for an isolated,
+   per-request workload, an abandoned in-process thread here keeps
+   running unsupervised in the background. This is an accepted,
+   honestly-documented limitation of an in-process watchdog, not a real
+   kill — see `run_task_with_watchdog`'s own comment.
 5. ★ Overprovisioning + rollover: `run_night_queue` takes a
    `time_budget_s`; once elapsed time reaches it, every remaining
    queued task is marked `DEFERRED` (not run, not silently dropped) —
@@ -40,7 +46,14 @@ Requirements, each mapped directly onto a piece of this module:
 8. Heartbeat every ~15 minutes — `render_heartbeat`/`write_heartbeat`,
    invoked from `run_night_queue`'s loop by real elapsed wall-clock
    time, plus one final heartbeat write after the last task so the
-   queue's end state is always on disk.
+   queue's end state is always on disk. ★ Known limitation, not yet a
+   background timer: the check only runs between tasks, so one task
+   running longer than `heartbeat_interval_s` (a real possibility for a
+   `watchdog_timeout_s`-bounded GPU training task) delays the next
+   heartbeat until that task returns — cadence is best-effort, not a
+   hard real-time guarantee. Every example task in this sandbox finishes
+   in well under 15 minutes, so this gap has no currently-reachable code
+   path; flagged here rather than silently assumed away.
 
 Acceptance (this round's own explicit ask): a deliberately-always-
 failing task placed in the middle of a queue must not block the tasks
@@ -152,7 +165,22 @@ def run_task_with_watchdog(
     task: NightTask, *, now_fn: Callable[[], float] = time.monotonic
 ) -> TaskOutcome:
     if task.smoke_test is not None:
-        smoke_status = task.smoke_test()
+        try:
+            smoke_status = task.smoke_test()
+        except Exception as e:
+            # A raising smoke_test is not the same event as a clean
+            # non-PASS return (SMOKE_TEST_NOT_PASSED promises "the probe
+            # ran and said no") — an exception means the probe itself
+            # malfunctioned, so it must never propagate out of here and
+            # kill the whole queue (item 2's `;` not `&&` guarantee
+            # applies just as much to the probe as to the real task).
+            return TaskOutcome(
+                task_id=task.task_id,
+                status=QueueTaskStatus.FAILED,
+                started_at=None,
+                ended_at=None,
+                detail=f"smoke_test raised {type(e).__name__}: {e}",
+            )
         if smoke_status is not CheckStatus.PASS:
             # ★ item 7: SKIP is not the same outcome as PASS — a FAIL
             # and a SKIP smoke test both mean "did not run the real
@@ -170,8 +198,25 @@ def run_task_with_watchdog(
         if task.watchdog_timeout_s is None:
             task.run()
         else:
-            with ThreadPoolExecutor(max_workers=1) as pool:
+            pool = ThreadPoolExecutor(max_workers=1)
+            try:
                 pool.submit(task.run).result(timeout=task.watchdog_timeout_s)
+            finally:
+                # wait=False, always — not just on the timeout path. A
+                # thread cannot be forcibly killed in Python: waiting for
+                # it here (the default `with ThreadPoolExecutor(...)`
+                # would do exactly that on __exit__) would block this
+                # loop on the abandoned thread and defeat item 4's whole
+                # point ("GPU 禁止空转", the next task must start the
+                # instant this one's budget is up). If `task.run()`
+                # already finished (the normal-completion and re-raised-
+                # exception cases below), the thread is already dead and
+                # `wait=False` costs nothing; only a genuine timeout
+                # leaves it running unsupervised in the background — an
+                # accepted, honestly-documented limitation of an in-
+                # process watchdog, unlike sqlexec/pool.py's subprocess-
+                # based hard-kill for a different, more isolated workload.
+                pool.shutdown(wait=False)
     except KeyboardInterrupt:
         return TaskOutcome(
             task_id=task.task_id,

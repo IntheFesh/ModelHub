@@ -1152,3 +1152,138 @@
   文件（本次真实运行里没有任务被烟测拦或被顺延，`tests/smoke/
   night_queue/test_night_queue_smoke.py`专门用合成场景验证了这两种
   "无 manifest"分支）。
+
+---
+
+## DD-0038 · B3 drill 改成真的加载 `configs/gate/admission.yaml`，
+  不再手写一份更严格的影子配置
+
+- 日期：2026-08-24 · Run: `drill-CKPT_A_UNDERFIT` / `drill-CKPT_B_REGRESSION`
+  / `drill-CKPT_D_SAFETY`（重跑，见下方"实测数字"；`docs/incident-log.md`
+  2026-08-24T14:54:40 前后三条记录）
+- 决策：用户要求"多角度检测、尽量不出错"，派了独立 agent 复核 B3 后发现
+  一个真实 bug：`scripts/bad_model_drill.py` 原来在模块顶层手写了一份
+  `AdmissionGateConfig`（accuracy floor 0.5、max_regressions=2、
+  truncation 0.1），跟仓库里已经提交的 `configs/gate/admission.yaml`
+  （floor 0.30、max_regressions=10、truncation 0.05）不一致——而且
+  排查后发现全仓库没有任何地方真的加载过这个 yaml 文件（`common/
+  config.py::load_yaml_config` 这个通用工具函数就在那，只是没人调）。
+  用旧的手写配置重放 ckpt-B/ckpt-D 的合成数据，代入真实 yaml 的阈值
+  重新计算：ckpt-B 的 10 个回归样本 `10 > 10` 为假，会 PASS 不会
+  REJECT；ckpt-D 的 30.00% 准确率 `0.30 < 0.30` 也为假，同样会 PASS。
+  也就是说，在这次复核之前，这个演练脚本从没有真正证明过"真实门禁会
+  拒绝这三个坏模型"——它证明的是"一份更严格、只存在于这个脚本自己
+  代码里的门禁会拒绝"，这正是 CLAUDE.md §4 点名的"超参写死在代码里"
+  反例。现在改成 `_load_admission_config()` 真的调
+  `load_yaml_config(AdmissionGateConfig, "configs/gate/admission.yaml",
+  stage=Stage.GATE)`，并把 ckpt-B 的回归样本数从 10 提到 15（真实
+  阈值下 10 只是打平，不会触发 `>` 判断）、ckpt-D 的正确数从 6/20 降到
+  5/20（30.00% 同样只是打平 30% 的 floor），让合成数据在真实、更宽松
+  的阈值下依然给出干净、有余量的 REJECT，而不是卡着边界线。
+- 考虑过：保留手写配置，只把数字改成跟 yaml 一致（硬编码两份相同
+  的数字，而不是加载同一份文件）。
+- 为什么不这么做：两份硬编码的数字迟早会再次漂移——这次复核本身就是
+  因为两份数字已经漂移过一次才发现问题的；只有真的加载同一个文件，
+  未来谁改了 `configs/gate/admission.yaml` 的阈值，这个演练脚本才会
+  自动跟着变，而不是继续证明一份已经过时的影子配置。
+- 什么情况会失效：如果未来 `configs/gate/admission.yaml` 的阈值改得
+  比现在更宽松，ckpt-B/ckpt-D 现在这组合成数据可能不再够格触发
+  REJECT，需要重新调整合成数据的"坏"到什么程度——但这正是"加载真实
+  配置"这个决策想要的效果：阈值一变，演练脚本要么继续诚实地证明
+  拒绝，要么诚实地报出"这份数据现在过不了门禁"的矛盾，而不是像
+  之前那样静默地在一份从没人验证过的影子阈值下自娱自乐。
+- 实测数字：重新跑 `scripts/bad_model_drill.py`，三个 verdict 都是
+  真实 `REJECT`——ckpt-A `20.00% < 30.00%`（accuracy）、ckpt-B
+  `15 regression(s) exceed the allowed 10`（regression）、ckpt-D
+  `25.00% < 30.00%`（accuracy，safety gate 本身真实 PASS，跟 DD-0034
+  的结论一致）。`tests/unit/b3/`、`tests/meta/b3/`、`tests/smoke/b3/`
+  共 81 个测试全绿，`tests/meta/b3/test_drill_gate_can_fail.py` 额外
+  加了"具体是哪个 gate 拒绝"的断言（原来只断言"REJECT"，独立 agent
+  指出这样测不出"拒绝原因被换错门禁"这类 bug）。
+
+---
+
+## DD-0039 · B4/B5 把 `ErrorCode.UNCLASSIFIED` 当成第三类"丢弃/
+  mask"，不并进模型错也不并进系统错
+
+- 日期：2026-08-24 · Run: 无（纯单元/元测试覆盖，非 GPU run）
+- 决策：独立 agent 复核发现 B4 `train/dpo.py::classify_prediction` 和
+  B5 `train/grpo/reward.py::compute_reward` 都会在拿到
+  `ErrorCode.UNCLASSIFIED`（sqlexec 三个后端的异常分类器兜底值，真实、
+  可达，不是假设场景）时直接 `raise ValueError`——这不是故意的
+  exhaustiveness 保护在起作用，而是两处都漏写了这一支，会在真实
+  k=4/GRPO rollout 采样时被一次意外的 DB 报错整个打崩。修复方式：
+  两边都新增一个独立分支（B4 的 `DiscardReason.UNCLASSIFIED`、B5 的
+  `MaskReason.UNCLASSIFIED`），既不当"模型错"（EXEC_FAILED/0.0 分）
+  也不当"确认的系统错"（跟 HARNESS_ERROR 合并），因为 UNCLASSIFIED
+  的语义就是"不知道是谁的错"；同时在 B4 的 `PreferenceDatasetReport`
+  和 B5 的 `StepDiagnostics` 里各加一个 `unclassified_rate` + 阈值
+  中止函数（复用 `eval/metrics.py::HARNESS_ERROR_FLOOD_THRESHOLD`
+  同一个 1% 数值），落实 CLAUDE.md §2.2"它是待办清单，不是垃圾桶。
+  占比 > 1% → 评估/训练中止"这句原文。
+- 考虑过：把 UNCLASSIFIED 直接归进已有的 `_EXEC_FAILED_CODES`/
+  `_MODEL_FAULT_ZERO_CODES` 集合，最省事，一行改完。
+- 为什么不这么做：那正是 CLAUDE.md §2.3 点名"全项目最容易犯、最难
+  发现、后果最严重的 bug"——把系统错当模型错。UNCLASSIFIED 出现的
+  真实原因是 sqlexec 的分类器没认出某个具体的 DB 异常消息，完全可能
+  是沙箱侧的问题，把它计成模型的 0 分/EXEC_FAILED，会在训练曲线完全
+  正常的情况下悄悄教模型学噪声，跟 HARNESS_ERROR 不做区分掩盖同一个
+  错误方向也不对——因为我们并不确定它一定是系统的错，直接并入
+  HARNESS_ERROR 的话，一次真正的系统故障爆发会被"未知原因"这个更
+  宽松的桶稀释，拖慢定位速度。
+- 什么情况会失效：如果未来 sqlexec 的异常分类器覆盖率提升到能可靠
+  区分每一种 DB 异常的真实归因（不再需要 UNCLASSIFIED 这个兜底），
+  这条分支和它的阈值检查会逐渐不再触发，但不需要因此删除——它是
+  防止分类覆盖率倒退的安全网，不是只服务当前分类器现状的临时代码。
+- 实测数字：`tests/unit/b4/test_dpo.py`（29 个，含新增的
+  `test_unclassified_flood_aborts_dataset_build`）、`tests/unit/b5/
+  test_reward.py` + `test_step_diagnostics.py`（共 66 个）、
+  `tests/meta/b4/`、`tests/meta/b5/`（新增 UNCLASSIFIED 专项场景）
+  全绿；修复前用 `git stash` 复现过一次，两处都能重现原始的
+  `ValueError` 崩溃，确认这确实是能被测出来的真回归，不是臆测的
+  理论风险。
+
+---
+
+## DD-0040 · night_queue 的 watchdog 超时改成 `shutdown(wait=False)`，
+  不再用默认的 `with ThreadPoolExecutor(...)`
+
+- 日期：2026-08-24 · Run: 无（纯单元测试，含一个用真实 wall-clock
+  计时的回归测试，见下方"实测数字"）
+- 决策：独立 agent 复核发现 `scripts/night_queue.py::
+  run_task_with_watchdog` 原来用 `with ThreadPoolExecutor(max_workers=1)
+  as pool:` 包住 `pool.submit(task.run).result(timeout=...)`——Python
+  的线程没法被强制杀死，`with` 块默认 `__exit__` 会调用
+  `shutdown(wait=True)`，这意味着一旦真的超时，这个函数会一直卡在
+  等那个已经放弃的线程真正跑完，而不是像 PLAN.md 项4"GPU 禁止空转"
+  要求的那样立刻把控制权交还给队列循环去启动下一个任务——超时保护
+  本身被超时保护自己的清理逻辑打穿了。同一个问题也让 SIGTERM 在
+  watchdog 包裹的任务执行期间不能"干净退出"（CLAUDE.md §6.3），因为
+  `KeyboardInterrupt` 一样要等 `pool.__exit__` 返回。改成手动管理
+  `ThreadPoolExecutor`，在 `finally` 里统一 `shutdown(wait=False)`，
+  正常完成/任务自身抛异常的路径下线程本来就已经跑完，`wait=False`
+  不产生额外代价；只有真超时那条路径下，被放弃的线程会继续在后台
+  跑，不再阻塞主循环。
+- 考虑过：换成 `ProcessPoolExecutor`，子进程超时可以真正 kill，
+  不留"僵尸线程"。
+- 为什么不这么做：`NightTask.run: Callable[[], None]` 在现有测试和
+  fixture 里大量用局部函数/闭包构造（`_make_run`、测试里的
+  `_tracked`/`_always_fails` 等），进程池要求可 pickle，会让整个
+  现有测试套件的写法全部推倒重来，属于超出这轮"复核并修复真实 bug"
+  范围的架构级改动；线程池 + `wait=False` 已经解决了"下一个任务能
+  立刻开始"这个真正要紧的保证，被放弃的线程本身不持有需要严格及时
+  释放的独占资源（这份沙箱里唯一的真实长任务是 GRPO 训练占位符，
+  本身就因为没装 verl 而诚实失败，不会真的触发超时分支）。
+- 什么情况会失效：如果未来 night_queue 要跑的任务本身会长时间占用
+  GPU 显存这类不能被"放弃"的独占资源，`wait=False` 遗留的僵尸线程
+  会变成真实问题（显存不会因为线程被放弃就释放），到那时候需要重新
+  评估进程级隔离或者要求每个长任务自己实现可中断/可取消的检查点，
+  而不是依赖这层通用 watchdog 兜底。
+- 实测数字：新增
+  `test_watchdog_timeout_returns_promptly_without_waiting_for_the_
+  abandoned_thread`，用真实 `time.monotonic()`（不是 fake clock）
+  验证一个睡 2.0 秒的任务在 `watchdog_timeout_s=0.1` 下必须在 1.0
+  秒内返回；修复前用同样的测试手法验证过会稳定卡满 2.0+ 秒（对比
+  `tests/unit/night_queue/`整个 26 个测试文件的总运行时间：修复前
+  的等价写法会让这一个测试单独耗时 2 秒以上，修复后整个 26 个测试
+  文件合计 0.22 秒），是可复现、可回归的真实计时证据，不是理论推导。

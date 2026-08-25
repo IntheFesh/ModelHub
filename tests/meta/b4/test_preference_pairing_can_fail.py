@@ -72,6 +72,29 @@ def test_undecidable_and_truncated_never_enter_a_pair() -> None:
     }
 
 
+def test_unclassified_candidate_never_enters_any_pair() -> None:
+    """A regression guard for the real bug this pass found: `classify_
+    prediction` used to hard-crash on `ErrorCode.UNCLASSIFIED` instead of
+    discarding it. If it were instead silently folded into EXEC_FAILED
+    (blaming the model for a possibly-system-side bug), this candidate
+    would show up as the rejected side of a pair — assert it never does."""
+    predictions = [
+        _prediction(predicted_sql="correct"),
+        _prediction(
+            predicted_sql="mystery_failure",
+            exec_code=ErrorCode.UNCLASSIFIED,
+            comparison_result=None,
+        ),
+    ]
+    result = build_preference_pairs_for_question("q0", predictions)
+    for pair in result.pairs:
+        assert pair.chosen_sql != "mystery_failure"
+        assert pair.rejected_sql != "mystery_failure"
+    assert result.pairs == ()  # only one real kept candidate — nothing to pair
+    discarded = [c for c in result.classified if c.discard_reason is not None]
+    assert discarded[0].discard_reason is DiscardReason.UNCLASSIFIED
+
+
 def test_four_identical_tier_candidates_produce_zero_pairs() -> None:
     """同级内不配对 — this would fail loudly (produce spurious pairs) if
     the implementation paired same-tier candidates."""

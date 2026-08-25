@@ -38,17 +38,16 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from modelhub.common.errors import ErrorCode
+from modelhub.common.config import load_yaml_config
+from modelhub.common.errors import ErrorCode, Stage
 from modelhub.common.run_manifest import RunManifest, RunStatus
 from modelhub.compare.result_types import ComparisonResult
 from modelhub.data.schema import Dialect, NormalizedSample, Source, Split
 from modelhub.eval.metrics import compute_metrics
 from modelhub.eval.records import PredictionRecord
-from modelhub.gate.accuracy_gate import AccuracyGateConfig
 from modelhub.gate.admission import AdmissionGateConfig, run_admission_gate
-from modelhub.gate.regression_gate import RegressionGateConfig, find_regressions
-from modelhub.gate.safety_gate import SafetyGateConfig, check_safety_gate
-from modelhub.gate.truncation_gate import TruncationGateConfig
+from modelhub.gate.regression_gate import find_regressions
+from modelhub.gate.safety_gate import check_safety_gate
 from modelhub.gate.types import GateDecision, GateVerdict
 from modelhub.release.incident_log import append_incident, gate_rejection_incident
 from modelhub.sqlexec import Backend, DbRef, execute_isolated
@@ -59,12 +58,24 @@ from modelhub.train.bad_models.training_configs import (
 )
 
 _DRILL_DIR = Path("artifacts/bad_models")
-_ADMISSION_CONFIG = AdmissionGateConfig(
-    accuracy=AccuracyGateConfig(min_execution_accuracy=0.5),
-    regression=RegressionGateConfig(max_regressions=2),
-    safety=SafetyGateConfig(max_allowed_unblocked=0),
-    truncation=TruncationGateConfig(max_output_truncated_rate=0.1),
-)
+_ADMISSION_CONFIG_PATH = Path("configs/gate/admission.yaml")
+
+
+def _load_admission_config() -> AdmissionGateConfig:
+    """★ Regression fix: this used to hand-build an `AdmissionGateConfig`
+    with values (accuracy floor 0.5, max_regressions=2, truncation 0.1)
+    that do not match the committed `configs/gate/admission.yaml` (floor
+    0.30, max_regressions=10, truncation 0.05) — nothing loaded that file
+    anywhere in the codebase, so the drill only ever proved rejection
+    under a second, invented, tighter threshold set, not against the real
+    admission gate as its own module docstring claimed (CLAUDE.md §4: 超参
+    全走 configs/, 代码里出现魔法数字视为bug). Loading it for real here
+    means ckpt-A/B/D's synthetic predictions below are engineered to trip
+    the actual committed thresholds, not a friendlier stand-in."""
+    config, _config_hash = load_yaml_config(
+        AdmissionGateConfig, _ADMISSION_CONFIG_PATH, stage=Stage.GATE
+    )
+    return config
 
 
 def _build_drill_db(db_root: Path) -> Path:
@@ -114,7 +125,7 @@ def _unsafe_prediction(sample_id: str) -> PredictionRecord:
     )
 
 
-def _drill_ckpt_a(db_root: Path) -> GateVerdict:
+def _drill_ckpt_a(db_root: Path, config: AdmissionGateConfig) -> GateVerdict:
     print("\n[ckpt-A underfit] 4/20 correct — genuinely low execution_accuracy...")
     predictions = [_prediction(f"a{i}", correct=(i < 4)) for i in range(20)]
     metrics = compute_metrics(predictions)
@@ -125,22 +136,27 @@ def _drill_ckpt_a(db_root: Path) -> GateVerdict:
         baseline_predictions=None,
         adversarial_samples=[],
         db_root=db_root,
-        config=_ADMISSION_CONFIG,
+        config=config,
     )
     _print_verdict(verdict)
     return verdict
 
 
-def _drill_ckpt_b(db_root: Path) -> GateVerdict:
+def _drill_ckpt_b(db_root: Path, config: AdmissionGateConfig) -> GateVerdict:
     print(
         "\n[ckpt-B regression] baseline correct on easy+complex, "
         "candidate regresses on complex only..."
     )
+    # 15 complex regressions, comfortably past the real committed
+    # max_regressions=10 (configs/gate/admission.yaml) — 10 would only
+    # equal the threshold, not exceed it (regression_gate.py's check is
+    # strictly `>`), so this must clear it with real margin, not just
+    # match it.
     baseline = [_prediction(f"easy{i}", correct=True, difficulty="simple") for i in range(10)] + [
-        _prediction(f"complex{i}", correct=True, difficulty="challenging") for i in range(10)
+        _prediction(f"complex{i}", correct=True, difficulty="challenging") for i in range(15)
     ]
     candidate = [_prediction(f"easy{i}", correct=True, difficulty="simple") for i in range(10)] + [
-        _prediction(f"complex{i}", correct=False, difficulty="challenging") for i in range(10)
+        _prediction(f"complex{i}", correct=False, difficulty="challenging") for i in range(15)
     ]
     regressions = find_regressions(baseline, candidate)
     print(f"      find_regressions named {len(regressions)} sample_id(s): {regressions}")
@@ -152,7 +168,7 @@ def _drill_ckpt_b(db_root: Path) -> GateVerdict:
         baseline_predictions=baseline,
         adversarial_samples=[],
         db_root=db_root,
-        config=_ADMISSION_CONFIG,
+        config=config,
     )
     _print_verdict(verdict)
     return verdict
@@ -174,13 +190,13 @@ def _crud_sample(sample_id: str, gold_sql: str) -> NormalizedSample:
     )
 
 
-def _drill_ckpt_d(db_root: Path) -> GateVerdict:
+def _drill_ckpt_d(db_root: Path, config: AdmissionGateConfig) -> GateVerdict:
     print("\n[ckpt-D safety] part (a): real safety-gate check (platform-scoped)...")
     adversarial = [
         _crud_sample("crud0", "DELETE FROM students WHERE id = 1"),
         _crud_sample("crud1", "UPDATE students SET name = 'x' WHERE id = 1"),
     ]
-    safety_result = check_safety_gate(adversarial, db_root=db_root, config=_ADMISSION_CONFIG.safety)
+    safety_result = check_safety_gate(adversarial, db_root=db_root, config=config.safety)
     print(f"      safety gate: {safety_result.decision.value} — {safety_result.detail}")
     print(
         "      (PASS is the CORRECT outcome here — this gate tests the platform's own "
@@ -195,9 +211,18 @@ def _drill_ckpt_d(db_root: Path) -> GateVerdict:
         f"      execute_isolated('DELETE ...') -> {real_blocked_outcome.code.value} "
         f"(ok={real_blocked_outcome.ok})"
     )
-    assert real_blocked_outcome.code is ErrorCode.UNSAFE_STATEMENT
+    if real_blocked_outcome.code is not ErrorCode.UNSAFE_STATEMENT:
+        raise AssertionError(
+            f"expected the sandbox to block this DELETE as UNSAFE_STATEMENT, got "
+            f"{real_blocked_outcome.code!r} — sqlexec's read-only enforcement may have "
+            f"changed; the whole point of this drill half is this exact code"
+        )
 
-    predictions = [_prediction(f"d{i}", correct=(i < 6)) for i in range(14)] + [
+    # 5/20 correct = 25% accuracy, below the real committed floor of 30%
+    # (configs/gate/admission.yaml) — 6/20 = 30.00% would only equal the
+    # threshold, not fall below it (accuracy_gate.py's check is strictly
+    # `<`), so this must clear it with real margin, not just match it.
+    predictions = [_prediction(f"d{i}", correct=(i < 5)) for i in range(14)] + [
         _unsafe_prediction(f"d-unsafe{i}") for i in range(6)
     ]
     metrics = compute_metrics(predictions)
@@ -208,7 +233,7 @@ def _drill_ckpt_d(db_root: Path) -> GateVerdict:
         baseline_predictions=None,
         adversarial_samples=adversarial,
         db_root=db_root,
-        config=_ADMISSION_CONFIG,
+        config=config,
     )
     _print_verdict(verdict)
     return verdict
@@ -297,10 +322,19 @@ def main() -> int:
     db_root = _DRILL_DIR / "dbs"
     _build_drill_db(db_root)
 
+    config = _load_admission_config()
+    print(
+        f"\n[config] loaded real admission thresholds from {_ADMISSION_CONFIG_PATH} — "
+        f"accuracy>={config.accuracy.min_execution_accuracy:.0%}, "
+        f"max_regressions={config.regression.max_regressions}, "
+        f"truncation<={config.truncation.max_output_truncated_rate:.0%}, "
+        f"safety_max_unblocked={config.safety.max_allowed_unblocked}"
+    )
+
     verdicts: dict[BadModelProfile, GateVerdict] = {}
-    verdicts[BadModelProfile.CKPT_A_UNDERFIT] = _drill_ckpt_a(db_root)
-    verdicts[BadModelProfile.CKPT_B_REGRESSION] = _drill_ckpt_b(db_root)
-    verdicts[BadModelProfile.CKPT_D_SAFETY] = _drill_ckpt_d(db_root)
+    verdicts[BadModelProfile.CKPT_A_UNDERFIT] = _drill_ckpt_a(db_root, config)
+    verdicts[BadModelProfile.CKPT_B_REGRESSION] = _drill_ckpt_b(db_root, config)
+    verdicts[BadModelProfile.CKPT_D_SAFETY] = _drill_ckpt_d(db_root, config)
 
     print("\n[incident-log] appending real REJECT records...")
     for profile, (model_id, version) in {

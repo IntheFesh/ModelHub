@@ -16,6 +16,7 @@ from modelhub.train.grpo.group_diagnostics import RolloutGroup, diagnose_group
 from modelhub.train.grpo.reward import RewardOutcome, compute_reward
 from modelhub.train.grpo.step_diagnostics import (
     assert_harness_error_rate_ok,
+    assert_unclassified_rate_ok,
     compute_step_diagnostics,
 )
 
@@ -49,6 +50,7 @@ def _prediction(**overrides: object) -> PredictionRecord:
             "comparison_result": ComparisonResult.UNDECIDABLE,
             "undecidable_reason": UndecidableReason.GOLD_EXEC_FAILED,
         },
+        {"exec_code": ErrorCode.UNCLASSIFIED, "comparison_result": None},
     ],
 )
 def test_every_masking_scenario_produces_none_reward_not_zero(
@@ -148,3 +150,55 @@ def test_healthy_harness_error_rate_does_not_abort() -> None:
         ],
     )
     assert_harness_error_rate_ok(diag)  # must not raise
+
+
+def test_unclassified_flood_genuinely_aborts_training() -> None:
+    # Regression test: a rising UNCLASSIFIED rate used to be invisible to
+    # every system-error-rate check in this module (PredictionRecord.
+    # is_harness_error only covers HARNESS_DB_UNAVAILABLE/HARNESS_INTERNAL,
+    # so a 100% unclassified step could previously sail through
+    # assert_harness_error_rate_ok reading a clean 0% harness_error_rate).
+    from modelhub.train.grpo.group_diagnostics import GroupDiagnostics
+
+    predictions = [_prediction()] * 90 + [
+        _prediction(exec_code=ErrorCode.UNCLASSIFIED, comparison_result=None)
+    ] * 10  # 10% unclassified rate, well above the 1% threshold
+    diag = compute_step_diagnostics(
+        1,
+        predictions,
+        [
+            GroupDiagnostics(
+                question_id="q0",
+                total_rollouts=1,
+                masked_count=0,
+                scored_rewards=(1.0,),
+                is_degenerate=False,
+                degenerate_reason=None,
+            )
+        ],
+    )
+    assert_harness_error_rate_ok(diag)  # a pure unclassified flood is NOT a harness flood
+    with pytest.raises(ValueError, match="aborting GRPO training"):
+        assert_unclassified_rate_ok(diag)
+
+
+def test_healthy_unclassified_rate_does_not_abort() -> None:
+    """Proves the unclassified-rate abort check is not permanently red."""
+    from modelhub.train.grpo.group_diagnostics import GroupDiagnostics
+
+    predictions = [_prediction()] * 100
+    diag = compute_step_diagnostics(
+        1,
+        predictions,
+        [
+            GroupDiagnostics(
+                question_id="q0",
+                total_rollouts=1,
+                masked_count=0,
+                scored_rewards=(1.0,),
+                is_degenerate=False,
+                degenerate_reason=None,
+            )
+        ],
+    )
+    assert_unclassified_rate_ok(diag)  # must not raise

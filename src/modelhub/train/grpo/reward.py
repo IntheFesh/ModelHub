@@ -21,6 +21,14 @@ must filter these out, not zero-fill them):
     "punishing the model for something that is not its fault" failure
     mode: if the gold result doesn't exist, there is no ground truth to
     score the model's SQL against, correct or not.
+  - `UNCLASSIFIED` (`ErrorCode.UNCLASSIFIED`, CLAUDE.md §2.2's one
+    permitted catch-all) — fault attribution is genuinely unknown here,
+    so scoring it 0.0 would risk exactly the §2.3 hazard this module's
+    docstring calls its central risk (silently teaching the policy on
+    noise). Masked like the others, but tracked separately via its own
+    `MaskReason.UNCLASSIFIED` and a rate threshold in
+    `step_diagnostics.py` — never conflated with a confirmed harness
+    fault, and never left to flood silently.
 
 Scored (reward=1.0 or 0.0, the model's own outcome):
   - `EXEC_OK` + `EQUAL` -> 1.0
@@ -58,6 +66,7 @@ class MaskReason(StrEnum):
     HARNESS_ERROR = "HARNESS_ERROR"
     OUTPUT_TRUNCATED = "OUTPUT_TRUNCATED"
     UNDECIDABLE = "UNDECIDABLE"
+    UNCLASSIFIED = "UNCLASSIFIED"
 
 
 @dataclass(frozen=True)
@@ -108,6 +117,13 @@ def compute_reward(prediction: PredictionRecord) -> RolloutReward:
             reward=None,
             outcome=RewardOutcome.MASKED,
             mask_reason=MaskReason.UNDECIDABLE,
+        )
+    if prediction.exec_code is ErrorCode.UNCLASSIFIED:
+        return RolloutReward(
+            sample_id=prediction.sample_id,
+            reward=None,
+            outcome=RewardOutcome.MASKED,
+            mask_reason=MaskReason.UNCLASSIFIED,
         )
     if prediction.exec_code is ErrorCode.EXEC_OK:
         if prediction.comparison_result is ComparisonResult.EQUAL:

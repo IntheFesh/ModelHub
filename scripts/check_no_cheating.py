@@ -264,12 +264,19 @@ def _find_todo_stub_returns(path: Path, tree: ast.AST, comment_lines: set[int]) 
 
 
 def _comment_lines_with_todo(source: bytes) -> set[int]:
+    # scan_source() already ran ast.parse() successfully on this same source
+    # before calling us, so this is a best-effort second pass purely for
+    # comment text (ast drops comments). tokenize is still stricter than ast
+    # about encoding cookies (e.g. a `# coding: ...` line that doesn't match
+    # the file's actual bytes raises SyntaxError or UnicodeDecodeError from
+    # tokenize's own decode step, not from ast.parse) — degrade to "no TODO
+    # lines found" rather than crash the whole scan over a comment-text probe.
     lines: set[int] = set()
     try:
         for tok in tokenize.tokenize(iter(source.splitlines(keepends=True)).__next__):
             if tok.type == tokenize.COMMENT and _TODO_PATTERN.search(tok.string):
                 lines.add(tok.start[0])
-    except (tokenize.TokenizeError, SyntaxError, IndentationError):
+    except (tokenize.TokenError, SyntaxError, IndentationError, UnicodeDecodeError):
         pass
     return lines
 
@@ -330,8 +337,15 @@ def scan_source(source: str, path: str) -> list[Finding]:
 def scan_file(path: Path) -> list[Finding]:
     try:
         source = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return []
+    except (OSError, UnicodeDecodeError) as e:
+        # A src/ file the scanner can't even read must never silently read as
+        # "0 findings, clean" — that is exactly the skip-counted-as-pass
+        # pattern CLAUDE.md §1.3 forbids, just at file-discovery time instead
+        # of a capability probe. Report it as a blocking finding instead;
+        # unlike every other rule this one has no allowlist path (the file's
+        # content can't be inspected for an `allow=` comment), so it can only
+        # be cleared by actually making the file readable.
+        return [Finding("FILE_UNREADABLE", str(path), 0, f"could not read file as UTF-8: {e}")]
     try:
         return scan_source(source, str(path))
     except SyntaxError as e:

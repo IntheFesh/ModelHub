@@ -6,6 +6,16 @@ THRESHOLD` (1%, CLAUDE.md §2.2's own literal "占比 > 1% → 评估/训练
 中止") rather than inventing a second, GRPO-specific number — this is
 the same real hazard (system faults contaminating a training/eval
 signal) CLAUDE.md already named a project-wide threshold for.
+
+`unclassified_rate` gets its own counter and its own abort guard,
+tracked separately from `harness_error_rate`: `PredictionRecord.
+is_harness_error` only covers confirmed `HARNESS_DB_UNAVAILABLE`/
+`HARNESS_INTERNAL`, so a rising `ErrorCode.UNCLASSIFIED` share (a real,
+reachable sqlexec classifier fallback — see `sqlexec/backends.py`) was
+previously invisible to every system-error-rate check in this module;
+`compute_reward` now masks it (see `reward.py`) but masking alone still
+lets an unbounded unclassified share silently starve real training
+signal, exactly the flood CLAUDE.md §2.2 requires an abort for.
 """
 
 from __future__ import annotations
@@ -27,6 +37,7 @@ class StepDiagnostics:
     harness_error_count: int
     timeout_count: int
     truncated_count: int
+    unclassified_count: int
     reward_histogram: dict[str, int]
     degenerate_group_count: int
     total_group_count: int
@@ -50,6 +61,10 @@ class StepDiagnostics:
         return self.truncated_count / self.total_rollouts
 
     @property
+    def unclassified_rate(self) -> float:
+        return self.unclassified_count / self.total_rollouts
+
+    @property
     def degenerate_group_rate(self) -> float:
         return self.degenerate_group_count / self.total_group_count
 
@@ -71,6 +86,7 @@ def compute_step_diagnostics(
         harness_error_count=sum(1 for p in predictions if p.is_harness_error),
         timeout_count=sum(1 for p in predictions if p.exec_code is ErrorCode.TIMEOUT),
         truncated_count=sum(1 for p in predictions if p.is_output_truncated),
+        unclassified_count=sum(1 for p in predictions if p.exec_code is ErrorCode.UNCLASSIFIED),
         reward_histogram=histogram,
         degenerate_group_count=sum(1 for g in group_diagnostics if g.is_degenerate),
         total_group_count=len(group_diagnostics),
@@ -90,8 +106,28 @@ def assert_harness_error_rate_ok(
         )
 
 
+def assert_unclassified_rate_ok(
+    diagnostics: StepDiagnostics, *, threshold: float = HARNESS_ERROR_FLOOD_THRESHOLD
+) -> None:
+    """Tracked and aborted separately from `assert_harness_error_rate_ok`:
+    `UNCLASSIFIED` is fault-unknown, not a confirmed harness fault, so
+    conflating the two counters would hide a rising unclassified share
+    inside a rate that only fires on `HARNESS_DB_UNAVAILABLE`/
+    `HARNESS_INTERNAL` (CLAUDE.md §2.2's own todo-list-not-trash-bin
+    framing for `UNCLASSIFIED` specifically)."""
+    if diagnostics.unclassified_rate > threshold:
+        raise ValueError(
+            f"step {diagnostics.step}: unclassified_rate "
+            f"{diagnostics.unclassified_rate:.2%} exceeds the allowed {threshold:.0%} — "
+            f"aborting GRPO training (CLAUDE.md §2.2: 占比 > 1% → 训练中止). UNCLASSIFIED is "
+            f"a todo list, not a trash bin — investigate the sqlexec classifier gap before "
+            f"training on more rollouts."
+        )
+
+
 __all__ = [
     "StepDiagnostics",
     "assert_harness_error_rate_ok",
+    "assert_unclassified_rate_ok",
     "compute_step_diagnostics",
 ]

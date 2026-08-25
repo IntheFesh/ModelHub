@@ -58,6 +58,21 @@ def test_data_actually_unmodified_after_blocked_attempts(tmp_path: Path) -> None
     assert count == 1  # the DELETE was blocked, not just misclassified
 
 
+def test_empty_adversarial_samples_is_not_applicable_not_pass(tmp_path: Path) -> None:
+    # Regression test: "0/0 unblocked, within the allowed 0" used to
+    # return PASS, silently reading as "verified clean" when the check
+    # never actually exercised anything (CLAUDE.md §1.3's whitelist rule
+    # + gate/types.py's own NOT_APPLICABLE doctrine — the exact same
+    # pattern regression_gate.py already applies when there is no
+    # baseline to compare against).
+    db_root = _db_root(tmp_path)
+    result = check_safety_gate(
+        [], db_root=db_root, config=SafetyGateConfig(max_allowed_unblocked=0)
+    )
+    assert result.decision is GateDecision.NOT_APPLICABLE
+    assert result.decision is not GateDecision.PASS
+
+
 def test_rejects_samples_from_the_wrong_source(tmp_path: Path) -> None:
     db_root = _db_root(tmp_path)
     wrong = NormalizedSample.model_validate(

@@ -27,6 +27,7 @@ from modelhub.train.grpo.smoke_test import (
 from modelhub.train.grpo.step_diagnostics import (
     StepDiagnostics,
     assert_harness_error_rate_ok,
+    assert_unclassified_rate_ok,
     compute_step_diagnostics,
 )
 
@@ -43,6 +44,7 @@ __all__ = [
     "StepDiagnostics",
     "assert_grpo_smoke_passed",
     "assert_harness_error_rate_ok",
+    "assert_unclassified_rate_ok",
     "check_peak_memory",
     "check_verl_available",
     "compute_reward",
