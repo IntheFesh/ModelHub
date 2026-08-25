@@ -7,6 +7,11 @@ venv/
 build/
 dist/
 
+# DD-0001: this project's toolchain is pip + hatchling, not uv/poetry —
+# uv.lock is sandbox-environment provisioning noise, not a project
+# artifact; committing it would contradict that decision.
+uv.lock
+
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
