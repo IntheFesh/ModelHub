@@ -1287,3 +1287,52 @@
   `tests/unit/night_queue/`整个 26 个测试文件的总运行时间：修复前
   的等价写法会让这一个测试单独耗时 2 秒以上，修复后整个 26 个测试
   文件合计 0.22 秒），是可复现、可回归的真实计时证据，不是理论推导。
+
+---
+
+## DD-0041 · README 重构 + 一键脚本；顺带修好一个存在了 12+ 轮的
+  死命令 `make bench`
+
+- 日期：2026-08-31 · Run: 无（纯 DX/文档改动 + 一个新增 CLI 模块的单测）
+- 决策：用户要求"重构 README，务必详细且易懂，准备好一键运行的脚本，
+  让程序运行更快更便捷"。做了三件事：(1) 新增 `scripts/quickstart.sh`
+  （建 venv + 装依赖 + 尽力起本地 Redis/Postgres + 真的跑一遍
+  ruff/mypy/全量测试）和 `scripts/showcase.sh`（串联本仓库仅有的三个
+  真实、不需要 GPU 的端到端流程：demo/bad-model-drill/night-queue），
+  以及被两者共用的 `scripts/lib_dev_services.sh`；(2) 重写
+  `README.md`，加入能力矩阵（什么真的能跑/什么代码写完等GPU）、
+  round→模块对照表、命令速查、FAQ；(3) 在验证"`make bench` 直接拒绝
+  启动"这句话是否真实时，发现 `Makefile` 从 A8 那一轮起就引用
+  `python -m modelhub.bench.cli`，但这个模块从未被创建过——12+ 轮里
+  `make bench` 实际调用会直接 `ModuleNotFoundError` 崩溃，而不是文档
+  一直声称的"GPU 独占检查后优雅拒绝"。新增
+  `src/modelhub/bench/cli.py`：解析 `--profile`，先调真实的
+  `guard_gpu_exclusivity`（CLAUDE.md §5.2 字面要求的顺序），确认
+  独占后加载对应 `configs/serve/model_profiles/<name>.yaml`，再
+  `raise NotImplementedError`——连真实 served 模型端点的调用形状都
+  没有在本沙箱验证过，不去猜一个大概率错的调用方式。
+- 考虑过：既然本沙箱永远跑不到 `NotImplementedError` 之后的真实压测
+  逻辑，干脆不修，README 里也不提这个命令；或者反过来在 README 里
+  按"现状忠实描述"写成"`make bench` 会报 `ModuleNotFoundError`"。
+- 为什么不这么做：不修的话，任何人在真实 GPU 机器上第一次跑
+  `make bench` 都会先撞见一个跟 GPU 完全无关的 `ModuleNotFoundError`，
+  白白浪费一次真机 debug 时间，且这明显不是"故意留白"而是纯粹的
+  疏漏——`bench/gpu_guard.py::guard_gpu_exclusivity` 本身在 A8 就已经
+  写好、测好，只是从没有一个入口真的调用它。既然发现了就应该修，而
+  不是把一个已知能修的死命令原样记录进新写的 README 里，那样 README
+  反而在传播一个可以避免的错误体验。
+- 什么情况会失效：一旦有真实 GPU 机器把这个 `NotImplementedError`
+  换成真正的 `run_sweep` 调用（需要接一个真实 served 模型端点的
+  `ModelClient`），这条决策记录里"连调用形状都没验证过"这部分就该
+  归档——但 `guard_gpu_exclusivity` 优先于一切的顺序不应该变。
+- 实测数字：`.venv/bin/python -m modelhub.bench.cli --profile arctic_7b`
+  在本沙箱（无 `nvidia-smi`）真实返回退出码 1，stderr 打印
+  "refusing to start bench run: GPU 0 exclusivity is not confirmed
+  (SKIP): nvidia-smi not found on PATH"——不再是 `ModuleNotFoundError`。
+  `scripts/quickstart.sh` 真实跑通：从 939（含 32 个诚实 skip）到起了
+  本地 Redis/Postgres 后 971 通过、0 skip；`scripts/showcase.sh` 真实
+  跑完三个 demo，产出新的 `docs/incident-log.md` 记录和
+  `artifacts/{bad_models,queues}/` 下的真实文件。新增
+  `tests/unit/a8/test_cli.py`（4 个测试，均针对本沙箱真实的
+  "无 nvidia-smi" 状态断言，不是模拟的 GPU 状态）。全项目 975 个测试
+  全绿（不含 requires_gpu/requires_network 的 4 个）。

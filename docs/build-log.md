@@ -1747,3 +1747,66 @@ wall-clock 验证 watchdog 修复前会稳定多卡 2 秒以上、修复后同�
     如果引入新的跨轮共享概念（新的 ErrorCode 成员、新的阈值常量），
     都应该主动检查所有消费方是否同步更新，而不能只验证新增代码本身。
 ```
+
+```
+README 重构 + 一键脚本（用户请求：重构 README 务必详细易懂 + 准备一键
+运行脚本让程序运行更快更便捷）—— 不是 PLAN.md 里的一轮任务，是收尾后
+的一次 DX（开发者体验）改进
+做了什么：
+  - 新增 `scripts/lib_dev_services.sh`（`ensure_redis`/`ensure_postgres`
+    共享辅助函数，幂等、best-effort，从不让调用方脚本因为可选服务起不来
+    而中止）、`scripts/quickstart.sh`（一键建 venv+装依赖+起本地服务+
+    真的跑一遍 ruff/mypy/全量测试）、`scripts/showcase.sh`（串联
+    demo.py/bad_model_drill.py/night_queue.py 三个真实端到端流程）。
+    Makefile 新增 `make quickstart`/`make showcase` 两个入口。
+  - 重写 `README.md`：能力矩阵（诚实区分"真的能跑"/"代码写完等GPU"）、
+    系统架构图（复用 docs/architecture.md 的 mermaid）、目录结构逐条
+    说明、round→模块对照表、命令速查表、FAQ。
+  - 验证 README 里"`make bench` 会优雅拒绝启动"这句话时，发现这从
+    A8 那一轮起就是假的——`Makefile` 引用的 `modelhub.bench.cli`
+    模块从未存在过，`make bench` 实际会 `ModuleNotFoundError` 崩溃。
+    新增 `src/modelhub/bench/cli.py` 把这个洞补上：先调真实
+    `guard_gpu_exclusivity`，确认独占后加载 model profile，再诚实
+    `raise NotImplementedError`（真实压测调用形状本沙箱验证不了）。
+
+遇到什么问题：
+  1. 新写的 `bench/cli.py` 里 `except ModelHubError: ... return 1`
+    被 `check_no_cheating.py` 的 `EXCEPT_RETURN_CONSTANT` 规则命中——
+    这是本项目第一次把一个带退出码的 CLI `main()` 放进 `src/`（此前
+    所有 CLI 脚本都在不受这条扫描规则覆盖的 `scripts/` 下），触发了
+    一个真实的误报。用已有的 `# check-no-cheating: allow=... reason=...`
+    白名单机制标注（CLI 退出码 1，不是伪装成功的假值），不是放宽规则
+    本身。踩了一个坑：allow 注释必须整行写在被命中行或其上一行，
+    我最初写成跨 4 行的注释块，正则只锚定单行末尾，导致第一次没匹配上。
+  2. 决定"一键脚本要不要自动起本地 Redis/Postgres"时，先在本沙箱真实
+    测试 `service redis-server start`/`service postgresql start`
+    （容器没有 systemd，走 sysvinit 风格的 `service` 包装脚本）都能
+    正常工作，且是可重复、不影响其他机器的本地操作，才决定做成
+    best-effort 自动化，而不是只打印一句"请手动起 Redis"。
+
+怎么解决的：见上。
+
+测出什么数字：真跑 `scripts/quickstart.sh`——起本地 Redis/Postgres 前
+`pytest` 是 939 passed + 32 skipped（Redis/Postgres 不可达，诚实跳过）；
+起了之后是 971 passed + 0 skipped（含新建的 `modelhub_test` 测试库）。
+真跑 `scripts/showcase.sh`——三个脚本全部真实执行，产出新的
+`docs/incident-log.md` 记录（真实 REJECT verdict）和
+`artifacts/{bad_models,queues}/` 下的真实文件。`bench/cli.py` 新增后
+全项目 975 passed（4 个 requires_gpu/requires_network 照常 deselect）。
+
+诚实清单：
+  - 没做：`bench/cli.py` 的 `NotImplementedError` 之后——真正连上一个
+    served 模型端点跑 `bench/sweep.py::run_sweep`——本沙箱没有真实 GPU
+    可以验证，没有猜一个未经验证的调用形状去"假装做完"。
+  - 假设了什么：假设一键脚本自动起本地 Redis/Postgres 这个行为对用户
+    是期望内的（只影响这台机器的本地开发环境，不触碰任何远程/生产
+    服务）——如果用户的机器上 6379/5432 端口另有用途，`ensure_redis`/
+    `ensure_postgres` 会先检测已有实例再决定要不要起新的，不会重复
+    起或抢占。
+  - 已知局限：`scripts/quickstart.sh`/`scripts/showcase.sh` 只在这个
+    沙箱环境（Debian/Ubuntu 容器、`service` 风格的 init、root 权限）
+    验证过；真实换到别的发行版/非 root 用户/systemd 环境时，
+    `ensure_redis`/`ensure_postgres` 的 `service ... start` 分支可能
+    需要调整（两个函数都已经是 best-effort、失败不中止调用方脚本，
+    但"失败"的具体报错信息会不一样）。
+```

@@ -66,3 +66,35 @@ Append-only. Written by `release/incident_log.py` — never hand-edited.
 - reason: accuracy: execution_accuracy 25.00% < required 30.00%
 - detail: 1 gate(s) rejected: accuracy
 
+---
+
+## 2026-08-31T20:40:25.794743+00:00 · GATE_REJECTION · demo-model@v-doomed
+
+- run_id: `demo-run`
+- reason: accuracy: execution_accuracy 0.00% < required 50.00%
+- detail: 1 gate(s) rejected: accuracy
+
+---
+
+## 2026-08-31T20:40:27.132310+00:00 · GATE_REJECTION · bad-model-drill@ckpt-a-underfit
+
+- run_id: `drill-CKPT_A_UNDERFIT`
+- reason: accuracy: execution_accuracy 20.00% < required 30.00%
+- detail: 1 gate(s) rejected: accuracy
+
+---
+
+## 2026-08-31T20:40:27.133778+00:00 · GATE_REJECTION · bad-model-drill@ckpt-b-regression
+
+- run_id: `drill-CKPT_B_REGRESSION`
+- reason: regression: 15 regression(s) exceed the allowed 10: ['complex0', 'complex1', 'complex2', 'complex3', 'complex4', 'complex5', 'complex6', 'complex7', 'complex8', 'complex9']
+- detail: 1 gate(s) rejected: regression
+
+---
+
+## 2026-08-31T20:40:27.134482+00:00 · GATE_REJECTION · bad-model-drill@ckpt-d-safety
+
+- run_id: `drill-CKPT_D_SAFETY`
+- reason: accuracy: execution_accuracy 25.00% < required 30.00%
+- detail: 1 gate(s) rejected: accuracy
+

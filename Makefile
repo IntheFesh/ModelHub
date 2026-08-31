@@ -1,4 +1,4 @@
-.PHONY: help venv install lint typecheck test verify-% verify-a11-% smoke bench \
+.PHONY: help quickstart showcase venv install lint typecheck test verify-% verify-a11-% smoke bench \
         check-cheating check-placeholders check-pollution render-docs demo bad-model-drill \
         night-queue clean
 
@@ -12,6 +12,10 @@ MYPY := $(VENV)/bin/mypy
 
 help:
 	@echo "modelhub Makefile"
+	@echo "  ── 一键命令 ──────────────────────────────────────────"
+	@echo "  make quickstart         一键环境搭建：venv+装依赖+起本地Redis/Postgres+全量校验"
+	@echo "  make showcase           一键跑完 3 个真实端到端 demo（无需 GPU）"
+	@echo "  ── 日常开发 ──────────────────────────────────────────"
 	@echo "  make venv               创建虚拟环境"
 	@echo "  make install            安装依赖 (dev extras)"
 	@echo "  make lint               ruff check + format --check"
@@ -27,6 +31,18 @@ help:
 	@echo "  make smoke PROFILE=x    烟测"
 	@echo "  make bench PROFILE=x    压测（需真实 GPU 环境，本沙箱会拒绝启动）"
 	@echo "  make night-queue        跑夜间任务队列"
+	@echo "  make clean              删除 venv/缓存"
+
+# 一键环境搭建：建 venv、装依赖、尽力起本地 Redis/Postgres（可选，失败不
+# 中止）、跑 ruff+mypy+全量测试证明环境真的能用（而不是"装完看起来没报错"）。
+# 幂等，可重复跑。见 scripts/quickstart.sh 顶部注释。
+quickstart:
+	@bash scripts/quickstart.sh
+
+# 一键跑完本仓库里三个真实、不需要 GPU 的端到端 demo：scripts/demo.py +
+# scripts/bad_model_drill.py + scripts/night_queue.py。见 scripts/showcase.sh。
+showcase:
+	@bash scripts/showcase.sh
 
 venv:
 	$(PYTHON) -m venv $(VENV)

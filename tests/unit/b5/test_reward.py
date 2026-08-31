@@ -125,9 +125,7 @@ class TestComputeReward:
         # would risk exactly the "system error taught as model error"
         # hazard this module's own docstring calls out as CLAUDE.md §2.3's
         # single biggest warning).
-        r = compute_reward(
-            _prediction(exec_code=ErrorCode.UNCLASSIFIED, comparison_result=None)
-        )
+        r = compute_reward(_prediction(exec_code=ErrorCode.UNCLASSIFIED, comparison_result=None))
         assert r.reward is None
         assert r.outcome is RewardOutcome.MASKED
         assert r.mask_reason is MaskReason.UNCLASSIFIED
